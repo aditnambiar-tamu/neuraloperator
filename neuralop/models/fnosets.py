@@ -200,10 +200,158 @@ class FNOEncoder(nn.Module):
         self._n_modes = n_modes
 
 class FNODecoder(nn.Module):
-    def __init__():
-        return
-    def forward():
-        return
+    """FNO-style decoder that maps a latent function to an output function."""
+
+    def __init__(
+        self,
+        n_modes: Tuple[int, ...],
+        hidden_channels: int,
+        out_channels: int,
+        n_layers: int = 4,
+        projection_channel_ratio: Number = 2,
+        non_linearity: nn.Module = F.gelu,
+        norm: Literal["ada_in", "group_norm", "instance_norm"] = None,
+        norm_groups: int = 1,
+        complex_data: bool = False,
+        use_channel_mlp: bool = True,
+        channel_mlp_dropout: float = 0,
+        channel_mlp_expansion: float = 0.5,
+        channel_mlp_skip: Literal["linear", "identity", "soft-gating", None] = "soft-gating",
+        fno_skip: Literal["linear", "identity", "soft-gating", None] = "linear",
+        resolution_scaling_factor: Union[Number, List[Number]] = None,
+        domain_padding: Union[Number, List[Number]] = None,
+        fno_block_precision: str = "full",
+        stabilizer: str = None,
+        max_n_modes: Tuple[int, ...] = None,
+        factorization: str = None,
+        rank: float = 1.0,
+        fixed_rank_modes: bool = False,
+        implementation: str = "factorized",
+        decomposition_kwargs: dict = None,
+        separable: bool = False,
+        preactivation: bool = False,
+        conv_module: nn.Module = SpectralConv,
+        enforce_hermitian_symmetry: bool = True,
+    ):
+        if decomposition_kwargs is None:
+            decomposition_kwargs = {}
+        super().__init__()
+
+        self.n_dim = len(n_modes)
+        self._n_modes = n_modes
+        self.hidden_channels = hidden_channels
+        self.out_channels = out_channels
+        self.n_layers = n_layers
+        self.projection_channel_ratio = projection_channel_ratio
+        self.projection_channels = int(projection_channel_ratio * hidden_channels)
+        self.non_linearity = non_linearity
+        self.complex_data = complex_data
+
+        if domain_padding is not None and (
+            (isinstance(domain_padding, list) and sum(domain_padding) > 0)
+            or (isinstance(domain_padding, (float, int)) and domain_padding > 0)
+        ):
+            self.domain_padding = DomainPadding(
+                domain_padding=domain_padding,
+                resolution_scaling_factor=resolution_scaling_factor,
+            )
+        else:
+            self.domain_padding = None
+
+        if resolution_scaling_factor is not None:
+            if isinstance(resolution_scaling_factor, (float, int)):
+                resolution_scaling_factor = [resolution_scaling_factor] * self.n_layers
+        self.resolution_scaling_factor = resolution_scaling_factor
+
+        self.fno_blocks = FNOBlocks(
+            in_channels=hidden_channels,
+            out_channels=hidden_channels,
+            n_modes=self.n_modes,
+            resolution_scaling_factor=resolution_scaling_factor,
+            use_channel_mlp=use_channel_mlp,
+            channel_mlp_dropout=channel_mlp_dropout,
+            channel_mlp_expansion=channel_mlp_expansion,
+            non_linearity=non_linearity,
+            stabilizer=stabilizer,
+            norm=norm,
+            norm_groups=norm_groups,
+            preactivation=preactivation,
+            fno_skip=fno_skip,
+            channel_mlp_skip=channel_mlp_skip,
+            complex_data=complex_data,
+            max_n_modes=max_n_modes,
+            fno_block_precision=fno_block_precision,
+            rank=rank,
+            fixed_rank_modes=fixed_rank_modes,
+            implementation=implementation,
+            separable=separable,
+            factorization=factorization,
+            decomposition_kwargs=decomposition_kwargs,
+            conv_module=conv_module,
+            n_layers=n_layers,
+            enforce_hermitian_symmetry=enforce_hermitian_symmetry,
+        )
+
+        self.context_query_mixer = ChannelMLP(
+            in_channels=2 * hidden_channels,  # h_agg and h_q are concatenated across the channel dimension.
+            out_channels=self.hidden_channels,
+            hidden_channels=self.projection_channels,
+            n_layers=2,
+            n_dim=self.n_dim,
+            non_linearity=non_linearity,
+        )
+        if self.complex_data:
+            self.context_query_mixer = ComplexValued(self.context_query_mixer)
+
+        self.projection = ChannelMLP(
+            in_channels=self.hidden_channels,
+            out_channels=out_channels,
+            hidden_channels=self.projection_channels,
+            n_layers=2,
+            n_dim=self.n_dim,
+            non_linearity=non_linearity,
+        )
+        if self.complex_data:
+            self.projection = ComplexValued(self.projection)
+
+    def forward(self, x, output_shape=None, **kwargs):
+        """Decode latent representation ``x`` into output-channel function values."""
+        if kwargs:
+            warnings.warn(
+                f"FNODecoder.forward() received unexpected keyword arguments: {list(kwargs.keys())}. "
+                "These arguments will be ignored.",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        if output_shape is None:
+            output_shape = [None] * self.n_layers
+        elif isinstance(output_shape, tuple):
+            output_shape = [None] * (self.n_layers - 1) + [output_shape]
+
+        x = self.context_query_mixer(x)
+
+        if self.domain_padding is not None:
+            x = self.domain_padding.pad(x)
+
+        for layer_idx in range(self.n_layers):
+            x = self.fno_blocks(x, layer_idx, output_shape=output_shape[layer_idx])
+
+        if self.domain_padding is not None:
+            x = self.domain_padding.unpad(x)
+
+        x = self.projection(x)
+
+        return x
+
+    @property
+    def n_modes(self):
+        return self._n_modes
+
+    @n_modes.setter
+    def n_modes(self, n_modes):
+        self.fno_blocks.n_modes = n_modes
+        self._n_modes = n_modes
 
 class FNOSets(BaseModel, name='FNOSets'):
     def __init__():
