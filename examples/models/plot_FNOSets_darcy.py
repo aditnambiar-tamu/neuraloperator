@@ -31,7 +31,7 @@ import matplotlib.pyplot as plt
 from neuralop.models import FNOSets
 from neuralop import Trainer
 from neuralop.training import AdamW
-from neuralop.data.datasets import load_multiop_1d_darcy
+from neuralop.data.datasets import load_multiop_darcy
 from neuralop.utils import count_model_params
 from neuralop import LpLoss, H1Loss
 
@@ -50,7 +50,7 @@ device = "cpu"
 
 data_path = Path("neuralop/data/datasets/poisson1d_dataset.pt")
 
-train_loader, test_loaders, data_processor = load_multiop_1d_darcy(
+train_loader, test_loaders, data_processor = load_multiop_darcy(
     data_path=data_path,
     n_train_operators=1000,
     n_test_operators=200,
@@ -76,6 +76,8 @@ data_processor = data_processor.to(device)
 # pooled context with the encoded query function, and decodes the query output.
 
 model = FNOSets(
+    # For 1D data, use n_modes=(m,). For 2D data, use n_modes=(m_x, m_y),
+    # for example n_modes=(16, 16).
     n_modes=(16,),
     in_channels=1,
     out_channels=1,
@@ -85,7 +87,8 @@ model = FNOSets(
     lifting_channel_ratio=2,
     projection_channel_ratio=2,
     channel_mlp_expansion=2.0,
-    # The 1D real-valued FFT path uses irfftn directly with this setting.
+    # This is needed for the current 1D real-valued FFT path. For 2D, the
+    # default enforce_hermitian_symmetry=True is usually appropriate.
     enforce_hermitian_symmetry=False,
 )
 model = model.to(device)
@@ -118,6 +121,7 @@ scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=30)
 # -------------------------
 # We use H1 loss for training and L2 loss for evaluation.
 
+# For 1D data, use d=1. For 2D data, use d=2.
 l2loss = LpLoss(d=1, p=2)
 h1loss = H1Loss(d=1)
 
