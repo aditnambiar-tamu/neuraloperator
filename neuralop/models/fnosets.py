@@ -572,4 +572,3 @@ class FNOSets(BaseModel, name='FNOSets'):
         self.query_encoder.n_modes = n_modes
         self.decoder.n_modes = n_modes
         self._n_modes = n_modes
-    
