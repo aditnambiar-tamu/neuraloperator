@@ -19,6 +19,15 @@ try:
 except ModuleNotFoundError:
     wandb_available = False
 
+# Only import tqdm and use if installed
+tqdm_available = False
+try:
+    from tqdm.auto import tqdm
+
+    tqdm_available = True
+except ModuleNotFoundError:
+    tqdm_available = False
+
 import neuralop.mpu.comm as comm
 from neuralop.losses import LpLoss
 from .training_state import load_training_state, save_training_state
@@ -52,6 +61,8 @@ class Trainer:
     use_distributed : bool, default is False
         whether to use DDP
     verbose : bool, default is False
+    progress_bar : bool, default is False
+        whether to show a tqdm progress bar during training epochs
     """
 
     def __init__(
@@ -67,6 +78,7 @@ class Trainer:
         log_output: bool = False,
         use_distributed: bool = False,
         verbose: bool = False,
+        progress_bar: bool = False,
     ):
         """ """
 
@@ -79,6 +91,7 @@ class Trainer:
         self.eval_interval = eval_interval
         self.log_output = log_output
         self.verbose = verbose
+        self.progress_bar = progress_bar
         self.use_distributed = use_distributed
         self.device = device
         # handle autocast device
@@ -293,10 +306,31 @@ class Trainer:
         # track number of training examples in batch
         self.n_samples = 0
 
-        for idx, sample in enumerate(train_loader):
+        progress_bar = self.progress_bar and tqdm_available
+        if self.progress_bar and not tqdm_available:
+            warnings.warn(
+                "Trainer was initialized with progress_bar=True, but tqdm is not installed. "
+                "Falling back to the standard training loop.",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        train_iter = enumerate(train_loader)
+        if progress_bar:
+            train_iter = tqdm(
+                train_iter,
+                total=len(train_loader),
+                desc=f"Epoch {epoch + 1}/{self.n_epochs}",
+                leave=False,
+            )
+
+        for idx, sample in train_iter:
             loss = self.train_one_batch(idx, sample, training_loss)
             loss.backward()
             self.optimizer.step()
+
+            if progress_bar:
+                train_iter.set_postfix(loss=f"{loss.item():.4f}")
 
             train_err += loss.item()
             with torch.no_grad():
