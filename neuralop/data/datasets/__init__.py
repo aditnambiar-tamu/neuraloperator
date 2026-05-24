@@ -1,4 +1,9 @@
 from .darcy import DarcyDataset, load_darcy_flow_small
+from .multioperator_1d_darcy import (
+    MultiOperator1DDarcyDataProcessor,
+    MultiOperator1DDarcyDataset,
+    load_multiop_1d_darcy,
+)
 from .navier_stokes import NavierStokesDataset, load_navier_stokes_pt
 from .pt_dataset import PTDataset
 from .burgers import Burgers1dTimeDataset, load_mini_burgers_1dtime

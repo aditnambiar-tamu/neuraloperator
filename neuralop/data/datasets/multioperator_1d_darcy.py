@@ -77,6 +77,7 @@ class MultiOperator1DDarcyDataset(Dataset):
         n_samples: int = None,
         random_context: bool = True,
         include_k: bool = False,
+        operator_direction: str = "f_to_u",
     ):
         super().__init__()
 
@@ -109,6 +110,13 @@ class MultiOperator1DDarcyDataset(Dataset):
         self.n_samples = n_samples if n_samples is not None else len(self.operator_indices)
         self.random_context = random_context
         self.include_k = include_k
+        self.operator_direction = operator_direction
+
+        if self.operator_direction not in {"f_to_u", "u_to_f"}:
+            raise ValueError(
+                "Expected operator_direction to be one of {'f_to_u', 'u_to_f'}, "
+                f"got {self.operator_direction}."
+            )
 
         if len(self.operator_indices) == 0:
             raise ValueError("operator_indices must contain at least one operator.")
@@ -137,11 +145,18 @@ class MultiOperator1DDarcyDataset(Dataset):
         operator_idx = self.operator_indices[index % len(self.operator_indices)]
         context_indices, query_idx = self._sample_pair_indices(index)
 
+        if self.operator_direction == "f_to_u":
+            input_functions = self.f
+            output_functions = self.u
+        else:
+            input_functions = self.u
+            output_functions = self.f
+
         sample = {
-            "u_context": self.u[operator_idx, context_indices].unsqueeze(1),
-            "f_context": self.f[operator_idx, context_indices].unsqueeze(1),
-            "u_query": self.u[operator_idx, query_idx].unsqueeze(0),
-            "y": self.f[operator_idx, query_idx].unsqueeze(0),
+            "u_context": input_functions[operator_idx, context_indices].unsqueeze(1),
+            "f_context": output_functions[operator_idx, context_indices].unsqueeze(1),
+            "u_query": input_functions[operator_idx, query_idx].unsqueeze(0),
+            "y": output_functions[operator_idx, query_idx].unsqueeze(0),
         }
 
         if self.include_k:
@@ -173,6 +188,7 @@ def load_multiop_1d_darcy(
     encode_input: bool = True,
     encode_output: bool = True,
     include_k: bool = False,
+    operator_direction: str = "f_to_u",
     num_workers: int = 0,
 ):
     """Load an episodic 1D Darcy dataset for ``FNOSets`` training.
@@ -193,6 +209,12 @@ def load_multiop_1d_darcy(
     f = data["f"]
     u = data["u"]
 
+    if operator_direction not in {"f_to_u", "u_to_f"}:
+        raise ValueError(
+            "Expected operator_direction to be one of {'f_to_u', 'u_to_f'}, "
+            f"got {operator_direction}."
+        )
+
     n_operators = k.shape[0]
     if n_train_operators + n_test_operators > n_operators:
         raise ValueError(
@@ -212,6 +234,7 @@ def load_multiop_1d_darcy(
         n_samples=n_train_samples,
         random_context=True,
         include_k=include_k,
+        operator_direction=operator_direction,
     )
 
     if n_test_samples is None:
@@ -225,13 +248,22 @@ def load_multiop_1d_darcy(
         n_samples=n_test_samples,
         random_context=False,
         include_k=include_k,
+        operator_direction=operator_direction,
     )
 
     train_u = u[train_operator_indices].reshape(-1, 1, u.shape[-1]).float()
     train_f = f[train_operator_indices].reshape(-1, 1, f.shape[-1]).float()
+
+    if operator_direction == "f_to_u":
+        train_inputs = train_f
+        train_outputs = train_u
+    else:
+        train_inputs = train_u
+        train_outputs = train_f
+
     data_processor = MultiOperator1DDarcyDataProcessor(
-        in_normalizer=_fit_normalizer(train_u, encode_input),
-        out_normalizer=_fit_normalizer(train_f, encode_output),
+        in_normalizer=_fit_normalizer(train_inputs, encode_input),
+        out_normalizer=_fit_normalizer(train_outputs, encode_output),
     )
 
     train_loader = DataLoader(
