@@ -207,15 +207,8 @@ trainer.train(
 # ``test_loaders["test"].dataset`` ensures the sampled episode comes from
 # operators that were not used by the training loader.
 
-def plot_fnosets_prediction(
-    model,
-    dataset,
-    data_processor,
-    index=0,
-    device="cpu",
-    title="FNOSets query prediction",
-):
-    """Plot FNOSets prediction and ground truth for one episodic sample."""
+def _predict_fnosets_sample(model, dataset, data_processor, index=0, device="cpu"):
+    """Run FNOSets on one episodic dataset sample."""
     model.eval()
     data_processor.eval()
 
@@ -234,8 +227,25 @@ def plot_fnosets_prediction(
         )
         out, sample = data_processor.postprocess(out, sample)
 
-    pred = out[0, 0].detach().cpu()
-    truth = sample["y"][0, 0].detach().cpu()
+    return out[0, 0].detach().cpu(), sample["y"][0, 0].detach().cpu()
+
+
+def plot_fnosets_prediction_1d(
+    model,
+    dataset,
+    data_processor,
+    index=0,
+    device="cpu",
+    title="FNOSets query prediction",
+):
+    """Plot 1D FNOSets prediction and ground truth for one episodic sample."""
+    pred, truth = _predict_fnosets_sample(
+        model=model,
+        dataset=dataset,
+        data_processor=data_processor,
+        index=index,
+        device=device,
+    )
     grid = torch.linspace(0, 1, pred.shape[-1])
 
     fig, ax = plt.subplots(figsize=(8, 4))
@@ -250,10 +260,41 @@ def plot_fnosets_prediction(
     return fig, ax
 
 
-plot_fnosets_prediction(
-    model=model,
-    dataset=test_loaders["test"].dataset,
-    data_processor=data_processor,
+def plot_fnosets_prediction_2d(
+    model,
+    dataset,
+    data_processor,
     index=0,
-    device=device,
-)
+    device="cpu",
+    title="FNOSets query prediction",
+):
+    """Plot 2D FNOSets prediction and ground truth for one episodic sample."""
+    pred, truth = _predict_fnosets_sample(
+        model=model,
+        dataset=dataset,
+        data_processor=data_processor,
+        index=index,
+        device=device,
+    )
+
+    vmin = min(pred.min().item(), truth.min().item())
+    vmax = max(pred.max().item(), truth.max().item())
+
+    fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+    im = axes[0].imshow(truth, origin="lower", vmin=vmin, vmax=vmax)
+    axes[0].set_title("Ground truth")
+    axes[1].imshow(pred, origin="lower", vmin=vmin, vmax=vmax)
+    axes[1].set_title("Prediction")
+    axes[2].imshow((pred - truth).abs(), origin="lower")
+    axes[2].set_title("Absolute error")
+
+    for ax in axes:
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+    fig.colorbar(im, ax=axes[:2], shrink=0.75)
+    fig.suptitle(title)
+    fig.tight_layout()
+    fig.show()
+
+    return fig, axes
