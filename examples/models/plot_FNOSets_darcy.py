@@ -159,7 +159,7 @@ sys.stdout.flush()
 
 trainer = Trainer(
     model=model,
-    n_epochs=100,
+    n_epochs=10,
     device=device,
     data_processor=data_processor,
     wandb_log=False,
@@ -194,107 +194,3 @@ trainer.train(
     save_best="test_h1",
     save_dir="./ckpt/fnosets_1d_darcy",
 )
-
-
-# %%
-# .. raw:: html
-#
-#    <div style="margin-top: 3em;"></div>
-#
-# Plotting a Prediction
-# ---------------------
-# We plot a query prediction from the held-out test operator split. Passing
-# ``test_loaders["test"].dataset`` ensures the sampled episode comes from
-# operators that were not used by the training loader.
-
-def _predict_fnosets_sample(model, dataset, data_processor, index=0, device="cpu"):
-    """Run FNOSets on one episodic dataset sample."""
-    model.eval()
-    data_processor.eval()
-
-    sample = dataset[index]
-    sample = {
-        key: value.unsqueeze(0).to(device) if torch.is_tensor(value) else value
-        for key, value in sample.items()
-    }
-    sample = data_processor.preprocess(sample)
-
-    with torch.no_grad():
-        out = model(
-            u_context=sample["u_context"],
-            f_context=sample["f_context"],
-            u_query=sample["u_query"],
-        )
-        out, sample = data_processor.postprocess(out, sample)
-
-    return out[0, 0].detach().cpu(), sample["y"][0, 0].detach().cpu()
-
-
-def plot_fnosets_prediction_1d(
-    model,
-    dataset,
-    data_processor,
-    index=0,
-    device="cpu",
-    title="FNOSets query prediction",
-):
-    """Plot 1D FNOSets prediction and ground truth for one episodic sample."""
-    pred, truth = _predict_fnosets_sample(
-        model=model,
-        dataset=dataset,
-        data_processor=data_processor,
-        index=index,
-        device=device,
-    )
-    grid = torch.linspace(0, 1, pred.shape[-1])
-
-    fig, ax = plt.subplots(figsize=(8, 4))
-    ax.plot(grid.tolist(), truth.tolist(), label="Ground truth", linewidth=2)
-    ax.plot(grid.tolist(), pred.tolist(), "--", label="Prediction", linewidth=2)
-    ax.set_xlabel("x")
-    ax.set_title(title)
-    ax.legend()
-    fig.tight_layout()
-    fig.show()
-
-    return fig, ax
-
-
-def plot_fnosets_prediction_2d(
-    model,
-    dataset,
-    data_processor,
-    index=0,
-    device="cpu",
-    title="FNOSets query prediction",
-):
-    """Plot 2D FNOSets prediction and ground truth for one episodic sample."""
-    pred, truth = _predict_fnosets_sample(
-        model=model,
-        dataset=dataset,
-        data_processor=data_processor,
-        index=index,
-        device=device,
-    )
-
-    vmin = min(pred.min().item(), truth.min().item())
-    vmax = max(pred.max().item(), truth.max().item())
-
-    fig, axes = plt.subplots(1, 3, figsize=(12, 4))
-    im = axes[0].imshow(truth, origin="lower", vmin=vmin, vmax=vmax)
-    axes[0].set_title("Ground truth")
-    axes[1].imshow(pred, origin="lower", vmin=vmin, vmax=vmax)
-    axes[1].set_title("Prediction")
-    axes[2].imshow((pred - truth).abs(), origin="lower")
-    axes[2].set_title("Absolute error")
-
-    for ax in axes:
-        ax.set_xticks([])
-        ax.set_yticks([])
-
-    fig.colorbar(im, ax=axes[:2], shrink=0.75)
-    fig.suptitle(title)
-    fig.tight_layout()
-    fig.show()
-
-    return fig, axes
