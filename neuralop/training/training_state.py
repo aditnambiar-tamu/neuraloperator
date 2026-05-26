@@ -75,7 +75,9 @@ def load_training_state(
         torch.cuda.empty_cache()
     else:
         save_pth = save_dir / f"{save_name}_state_dict.pt"
-        model.load_state_dict(torch.load(save_pth.absolute().as_posix()))
+        model.load_state_dict(
+            torch.load(save_pth.absolute().as_posix(), map_location=map_location)
+        )
 
     # load optimizer if state exists
     if optimizer is not None:
