@@ -11,6 +11,16 @@ import torch.distributed as dist
 from neuralop.mpu.comm import get_local_rank
 
 
+def _torch_load_trusted(path, map_location=None):
+    """Load neuralop checkpoints saved with Python metadata.
+
+    BaseModel.state_dict() stores model init kwargs under ``_metadata``. Those
+    kwargs can include callables such as ``torch.nn.functional.gelu``, which are
+    blocked by PyTorch 2.6's default ``weights_only=True`` loader.
+    """
+    return torch.load(path, map_location=map_location, weights_only=False)
+
+
 def load_training_state(
     save_dir: Union[str, Path],
     save_name: str,
@@ -59,7 +69,7 @@ def load_training_state(
     epoch = None
     manifest_pth = save_dir / "manifest.pt"
     if manifest_pth.exists():
-        manifest = torch.load(manifest_pth)
+        manifest = _torch_load_trusted(manifest_pth)
         epoch = manifest.get("epoch")
 
     if dist.is_initialized():
@@ -69,35 +79,35 @@ def load_training_state(
         device_id = get_local_rank()
         save_pth = save_dir / f"{save_name}_state_dict.pt"
         model.load_state_dict(
-            torch.load(save_pth.absolute().as_posix(), map_location="cpu")
+            _torch_load_trusted(save_pth.absolute().as_posix(), map_location="cpu")
         )
         model = model.to(device=f"cuda:{device_id}")
         torch.cuda.empty_cache()
     else:
         save_pth = save_dir / f"{save_name}_state_dict.pt"
         model.load_state_dict(
-            torch.load(save_pth.absolute().as_posix(), map_location=map_location)
+            _torch_load_trusted(save_pth.absolute().as_posix(), map_location=map_location)
         )
 
     # load optimizer if state exists
     if optimizer is not None:
         optimizer_pth = save_dir / "optimizer.pt"
         if optimizer_pth.exists():
-            optimizer.load_state_dict(torch.load(optimizer_pth.absolute().as_posix(), map_location=map_location))
+            optimizer.load_state_dict(_torch_load_trusted(optimizer_pth.absolute().as_posix(), map_location=map_location))
         else:
             print(f"Warning: requested to load optimizer state, but no saved optimizer state exists in {save_dir}.")
     
     if scheduler is not None:
         scheduler_pth = save_dir / "scheduler.pt"
         if scheduler_pth.exists():
-            scheduler.load_state_dict(torch.load(scheduler_pth.absolute().as_posix(), map_location=map_location))
+            scheduler.load_state_dict(_torch_load_trusted(scheduler_pth.absolute().as_posix(), map_location=map_location))
         else:
             print(f"Warning: requested to load scheduler state, but no saved scheduler state exists in {save_dir}.")
     
     if regularizer is not None:
         regularizer_pth = save_dir / "regularizer.pt"
         if regularizer_pth.exists():
-            regularizer.load_state_dict(torch.load(regularizer_pth.absolute().as_posix(), map_location=map_location))
+            regularizer.load_state_dict(_torch_load_trusted(regularizer_pth.absolute().as_posix(), map_location=map_location))
         else:
             print(f"Warning: requested to load regularizer state, but no saved regularizer state exists in {save_dir}.")
     
