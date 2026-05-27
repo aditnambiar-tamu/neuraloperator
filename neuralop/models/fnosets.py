@@ -208,6 +208,7 @@ class FNODecoder(nn.Module):
         hidden_channels: int,
         out_channels: int,
         n_layers: int = 4,
+        in_channels: int = None,
         projection_channel_ratio: Number = 2,
         non_linearity: nn.Module = F.gelu,
         norm: Literal["ada_in", "group_norm", "instance_norm"] = None,
@@ -239,6 +240,7 @@ class FNODecoder(nn.Module):
 
         self.n_dim = len(n_modes)
         self._n_modes = n_modes
+        self.in_channels = in_channels if in_channels is not None else 2 * hidden_channels
         self.hidden_channels = hidden_channels
         self.out_channels = out_channels
         self.n_layers = n_layers
@@ -293,7 +295,7 @@ class FNODecoder(nn.Module):
         )
 
         self.context_query_mixer = ChannelMLP(
-            in_channels=2 * hidden_channels,  # h_agg and h_q are concatenated across the channel dimension.
+            in_channels=self.in_channels,
             out_channels=self.hidden_channels,
             hidden_channels=self.projection_channels,
             n_layers=2,
@@ -396,6 +398,7 @@ class FNOSets(BaseModel, name='FNOSets'):
 
         self.n_dim = len(n_modes)
         self._n_modes = n_modes
+
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.hidden_channels = hidden_channels
@@ -570,5 +573,219 @@ class FNOSets(BaseModel, name='FNOSets'):
         self.u_context_encoder.n_modes = n_modes
         self.f_context_encoder.n_modes = n_modes
         self.query_encoder.n_modes = n_modes
+        self.decoder.n_modes = n_modes
+        self._n_modes = n_modes
+
+
+class FNOSetsInverse(BaseModel, name='FNOSetsInverse'):
+    """Infer a coefficient field from in-context input-output function pairs.
+
+    The model encodes each context pair independently, mixes the paired latent
+    representation, mean-pools across the context set, and decodes the pooled
+    latent field into the coefficient function.
+    """
+
+    def __init__(
+        self,
+        n_modes: Tuple[int, ...],
+        in_channels: int,
+        out_channels: int,
+        coefficient_channels: int,
+        hidden_channels: int,
+        encoder_layers: int = 4,
+        decoder_layers: int = 4,
+        lifting_channel_ratio: Number = 2,
+        projection_channel_ratio: Number = 2,
+        positional_embedding: Union[str, nn.Module] = "grid",
+        non_linearity: nn.Module = F.gelu,
+        norm: Literal["ada_in", "group_norm", "instance_norm"] = None,
+        norm_groups: int = 1,
+        complex_data: bool = False,
+        use_channel_mlp: bool = True,
+        channel_mlp_dropout: float = 0,
+        channel_mlp_expansion: float = 0.5,
+        channel_mlp_skip: Literal["linear", "identity", "soft-gating", None] = "soft-gating",
+        fno_skip: Literal["linear", "identity", "soft-gating", None] = "linear",
+        encoder_resolution_scaling_factor: Union[Number, List[Number]] = None,
+        decoder_resolution_scaling_factor: Union[Number, List[Number]] = None,
+        domain_padding: Union[Number, List[Number]] = None,
+        fno_block_precision: str = "full",
+        stabilizer: str = None,
+        max_n_modes: Tuple[int, ...] = None,
+        factorization: str = None,
+        rank: float = 1.0,
+        fixed_rank_modes: bool = False,
+        implementation: str = "factorized",
+        decomposition_kwargs: dict = None,
+        separable: bool = False,
+        preactivation: bool = False,
+        conv_module: nn.Module = SpectralConv,
+        enforce_hermitian_symmetry: bool = True,
+    ):
+        if decomposition_kwargs is None:
+            decomposition_kwargs = {}
+        super().__init__()
+
+        self.n_dim = len(n_modes)
+        self._n_modes = n_modes
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.coefficient_channels = coefficient_channels
+        self.hidden_channels = hidden_channels
+        self.encoder_layers = encoder_layers
+        self.decoder_layers = decoder_layers
+        self.complex_data = complex_data
+
+        encoder_kwargs = dict(
+            n_modes=n_modes,
+            hidden_channels=hidden_channels,
+            n_layers=encoder_layers,
+            lifting_channel_ratio=lifting_channel_ratio,
+            positional_embedding=positional_embedding,
+            non_linearity=non_linearity,
+            norm=norm,
+            norm_groups=norm_groups,
+            complex_data=complex_data,
+            use_channel_mlp=use_channel_mlp,
+            channel_mlp_dropout=channel_mlp_dropout,
+            channel_mlp_expansion=channel_mlp_expansion,
+            channel_mlp_skip=channel_mlp_skip,
+            fno_skip=fno_skip,
+            resolution_scaling_factor=encoder_resolution_scaling_factor,
+            domain_padding=domain_padding,
+            fno_block_precision=fno_block_precision,
+            stabilizer=stabilizer,
+            max_n_modes=max_n_modes,
+            factorization=factorization,
+            rank=rank,
+            fixed_rank_modes=fixed_rank_modes,
+            implementation=implementation,
+            decomposition_kwargs=decomposition_kwargs,
+            separable=separable,
+            preactivation=preactivation,
+            conv_module=conv_module,
+            enforce_hermitian_symmetry=enforce_hermitian_symmetry,
+        )
+        self.u_context_encoder = FNOEncoder(
+            in_channels=in_channels,
+            **encoder_kwargs,
+        )
+        self.f_context_encoder = FNOEncoder(
+            in_channels=out_channels,
+            **encoder_kwargs,
+        )
+
+        pair_mixer_channels = int(projection_channel_ratio * hidden_channels)
+        self.context_pair_mixer = ChannelMLP(
+            in_channels=2 * hidden_channels,
+            out_channels=hidden_channels,
+            hidden_channels=pair_mixer_channels,
+            n_layers=2,
+            n_dim=self.n_dim,
+            non_linearity=non_linearity,
+        )
+        if self.complex_data:
+            self.context_pair_mixer = ComplexValued(self.context_pair_mixer)
+
+        self.decoder = FNODecoder(
+            n_modes=n_modes,
+            hidden_channels=hidden_channels,
+            out_channels=coefficient_channels,
+            in_channels=hidden_channels,
+            n_layers=decoder_layers,
+            projection_channel_ratio=projection_channel_ratio,
+            non_linearity=non_linearity,
+            norm=norm,
+            norm_groups=norm_groups,
+            complex_data=complex_data,
+            use_channel_mlp=use_channel_mlp,
+            channel_mlp_dropout=channel_mlp_dropout,
+            channel_mlp_expansion=channel_mlp_expansion,
+            channel_mlp_skip=channel_mlp_skip,
+            fno_skip=fno_skip,
+            resolution_scaling_factor=decoder_resolution_scaling_factor,
+            domain_padding=domain_padding,
+            fno_block_precision=fno_block_precision,
+            stabilizer=stabilizer,
+            max_n_modes=max_n_modes,
+            factorization=factorization,
+            rank=rank,
+            fixed_rank_modes=fixed_rank_modes,
+            implementation=implementation,
+            decomposition_kwargs=decomposition_kwargs,
+            separable=separable,
+            preactivation=preactivation,
+            conv_module=conv_module,
+            enforce_hermitian_symmetry=enforce_hermitian_symmetry,
+        )
+
+    def forward(
+        self,
+        u_context,
+        f_context,
+        u_query=None,
+        y=None,
+        k=None,
+        encoder_output_shape=None,
+        decoder_output_shape=None,
+        **kwargs,
+    ):
+        """Predict a coefficient field from context function pairs.
+
+        ``u_context`` and ``f_context`` follow the same key names as
+        ``FNOSets``. With ``operator_direction="f_to_u"`` in the Darcy loader,
+        ``u_context`` contains the forcing functions and ``f_context`` contains
+        the solution functions.
+        """
+        if kwargs:
+            warnings.warn(
+                f"FNOSetsInverse.forward() received unexpected keyword arguments: {list(kwargs.keys())}. "
+                "These arguments will be ignored.",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        if u_context.ndim != f_context.ndim:
+            raise ValueError(
+                "Expected u_context and f_context to have the same number of dimensions, "
+                f"got {u_context.ndim} and {f_context.ndim}."
+            )
+        if u_context.shape[0] != f_context.shape[0] or u_context.shape[1] != f_context.shape[1]:
+            raise ValueError(
+                "Expected u_context and f_context to agree on batch and context dimensions, "
+                f"got {u_context.shape[:2]} and {f_context.shape[:2]}."
+            )
+
+        batch_size, n_context = u_context.shape[:2]
+        u_context_shape = u_context.shape[2:]
+        f_context_shape = f_context.shape[2:]
+
+        u_context = u_context.reshape(batch_size * n_context, *u_context_shape)
+        f_context = f_context.reshape(batch_size * n_context, *f_context_shape)
+
+        h_u = self.u_context_encoder(u_context, output_shape=encoder_output_shape)
+        h_f = self.f_context_encoder(f_context, output_shape=encoder_output_shape)
+
+        h_context = torch.cat([h_u, h_f], dim=1)
+        h_context = self.context_pair_mixer(h_context)
+
+        h_context = h_context.reshape(
+            batch_size,
+            n_context,
+            self.hidden_channels,
+            *h_context.shape[2:],
+        )
+        h_agg = h_context.mean(dim=1)
+
+        return self.decoder(h_agg, output_shape=decoder_output_shape)
+
+    @property
+    def n_modes(self):
+        return self._n_modes
+
+    @n_modes.setter
+    def n_modes(self, n_modes):
+        self.u_context_encoder.n_modes = n_modes
+        self.f_context_encoder.n_modes = n_modes
         self.decoder.n_modes = n_modes
         self._n_modes = n_modes
