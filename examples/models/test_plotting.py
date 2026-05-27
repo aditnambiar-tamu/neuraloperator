@@ -201,11 +201,12 @@ metrics = trainer.evaluate(
 
 print(metrics)
 
-plot_fnosets_prediction_1d(
-    model=model,
-    dataset=test_loaders["test"].dataset,
-    data_processor=data_processor,
-    index=random.randrange(len(test_loaders["test"].dataset)),
-    device=device,
-    save_path="fnosets_prediction_1d.png",
-)
+for i in range(20):
+    plot_fnosets_prediction_1d(
+        model=model,
+        dataset=test_loaders["test"].dataset,
+        data_processor=data_processor,
+        index=random.randrange(len(test_loaders["test"].dataset)),
+        device=device,
+        save_path=f"fnosets_prediction_1d_{i}.png",
+    )
