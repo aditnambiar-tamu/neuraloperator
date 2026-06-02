@@ -8,6 +8,8 @@ from neuralop.models import FNOSets
 from neuralop import Trainer, LpLoss, H1Loss
 from neuralop.training.training_state import load_training_state
 from neuralop.data.datasets import load_multiop_darcy
+from torch.utils.data import DataLoader
+from neuralop.data.datasets import MultiOperatorDarcyDataset
 
 # %%
 # .. raw:: html
@@ -156,7 +158,27 @@ train_loader, test_loaders, data_processor = load_multiop_darcy(
     encode_output=True,
     operator_direction="f_to_u",
 )
+
 data_processor = data_processor.to(device)
+
+# loading test dataset on unseen operators
+raw_dataset = train_loader.dataset
+final_test_dataset = MultiOperatorDarcyDataset(
+    k=raw_dataset.k,
+    f=raw_dataset.f,
+    u=raw_dataset.u,
+    operator_indices=torch.arange(120000, 125000),
+    n_context=8,
+    n_samples=5000,
+    random_context=False,
+    operator_direction="f_to_u",
+)
+
+final_test_loader = DataLoader(
+    final_test_dataset,
+    batch_size=32,
+    shuffle=False,
+)
 
 model = FNOSets(
     n_modes=(16,),
@@ -195,7 +217,7 @@ trainer = Trainer(
 
 metrics = trainer.evaluate(
     loss_dict=eval_losses,
-    data_loader=test_loaders["test"],
+    data_loader=final_test_loader,
     log_prefix="test",
 )
 
@@ -204,9 +226,9 @@ print(metrics)
 for i in range(20):
     plot_fnosets_prediction_1d(
         model=model,
-        dataset=test_loaders["test"].dataset,
+        dataset=final_test_loader.dataset,
         data_processor=data_processor,
-        index=random.randrange(len(test_loaders["test"].dataset)),
+        index=random.randrange(len(final_test_loader.dataset)),
         device=device,
         save_path=f"fnosets_prediction_1d_{i}.png",
     )
