@@ -4,6 +4,10 @@ from .multioperator_darcy import (
     MultiOperatorDarcyDataset,
     load_multiop_darcy,
 )
+from .chunked_multioperator_darcy import (
+    ChunkedMultiOperatorDarcyDataset,
+    load_chunked_multiop_darcy,
+)
 from .navier_stokes import NavierStokesDataset, load_navier_stokes_pt
 from .pt_dataset import PTDataset
 from .burgers import Burgers1dTimeDataset, load_mini_burgers_1dtime
