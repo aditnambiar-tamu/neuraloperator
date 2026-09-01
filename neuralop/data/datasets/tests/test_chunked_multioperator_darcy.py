@@ -7,6 +7,7 @@ from neuralop.data.datasets import (
     ChunkedMultiOperatorDarcyDataset,
     MultiOperatorDarcyDataset,
     load_chunked_multiop_darcy,
+    load_multiop_darcy,
 )
 
 
@@ -198,6 +199,118 @@ def test_chunks_cannot_mix_scalar_and_tensor_coefficients(tmp_path):
         ChunkedMultiOperatorDarcyDataset(
             [tmp_path / "chunk_0.pt", tmp_path / "chunk_1.pt"],
             n_context=2,
+        )
+
+
+def test_in_memory_dataset_uses_seven_fixed_context_pairs():
+    pair_values = torch.arange(8, dtype=torch.float32).reshape(1, 8, 1)
+    f = pair_values.expand(2, 8, 5).clone()
+    dataset = MultiOperatorDarcyDataset(
+        k=torch.ones(2, 5),
+        f=f,
+        u=f + 100,
+        operator_indices=torch.arange(2),
+        n_context=7,
+        n_samples=8,
+        random_context=True,
+        fixed_context_indices=range(7),
+    )
+
+    for index in range(len(dataset)):
+        sample = dataset[index]
+        assert torch.equal(
+            sample["u_context"][:, 0, 0],
+            torch.arange(7, dtype=torch.float32),
+        )
+        assert torch.all(sample["u_query"] == 7)
+
+
+def test_in_memory_loader_propagates_fixed_context_indices(tmp_path):
+    pair_values = torch.arange(5, dtype=torch.float32).reshape(1, 5, 1)
+    f = pair_values.expand(4, 5, 3).clone()
+    data_path = tmp_path / "dataset.pt"
+    torch.save({"k": torch.ones(4, 3), "f": f, "u": f + 100}, data_path)
+
+    train_loader, test_loaders, _ = load_multiop_darcy(
+        data_path=data_path,
+        n_train_operators=2,
+        n_test_operators=2,
+        n_context=2,
+        batch_size=2,
+        test_batch_size=2,
+        n_train_samples=2,
+        encode_input=False,
+        encode_output=False,
+        fixed_context_indices=[1, 3],
+    )
+
+    train_sample = next(iter(train_loader))
+    assert torch.equal(
+        train_sample["u_context"][:, :, 0, 0],
+        torch.tensor([[1.0, 3.0], [1.0, 3.0]]),
+    )
+    assert len(test_loaders["test"].dataset) == 2 * 3
+
+
+def test_chunked_loader_cycles_queries_outside_fixed_context(tmp_path):
+    for index in range(3):
+        _write_chunk(
+            tmp_path / f"chunk_{index}.pt",
+            index * 10,
+            n_operators=2,
+            n_pairs=5,
+        )
+
+    train_loader, val_loaders, test_loader, _ = load_chunked_multiop_darcy(
+        chunk_dir=tmp_path,
+        n_context=2,
+        batch_size=2,
+        n_train_chunks=1,
+        n_val_chunks=1,
+        n_test_chunks=1,
+        n_train_samples=2,
+        encode_input=False,
+        encode_output=False,
+        fixed_context_indices=[1, 3],
+    )
+
+    assert torch.equal(
+        train_loader.dataset.fixed_context_indices, torch.tensor([1, 3])
+    )
+    assert len(val_loaders["val"].dataset) == 2 * 3
+    assert len(test_loader.dataset) == 2 * 3
+
+    val_dataset = val_loaders["val"].dataset
+    samples = [val_dataset[(0, episode)] for episode in (0, 2, 4)]
+    assert [sample["u_query"][0, 0].item() for sample in samples] == [
+        10,
+        12,
+        14,
+    ]
+    for sample in samples:
+        assert torch.equal(
+            sample["u_context"][:, 0, 0], torch.tensor([11.0, 13.0])
+        )
+
+
+@pytest.mark.parametrize(
+    ("fixed_context_indices", "message"),
+    [
+        ([0], "exactly n_context"),
+        ([0, 0], "must not contain duplicates"),
+        ([0, 4], "must lie in"),
+    ],
+)
+def test_fixed_context_indices_are_validated(fixed_context_indices, message):
+    f = torch.ones(2, 4, 5)
+    with pytest.raises(ValueError, match=message):
+        MultiOperatorDarcyDataset(
+            k=torch.ones(2, 5),
+            f=f,
+            u=f,
+            operator_indices=torch.arange(2),
+            n_context=2,
+            fixed_context_indices=fixed_context_indices,
         )
 
 

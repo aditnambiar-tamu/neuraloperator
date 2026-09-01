@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import List, Union
+from typing import List, Optional, Sequence, Union
 
 import torch
 from torch.utils.data import DataLoader, Dataset
@@ -99,6 +99,50 @@ def _validate_multioperator_tensors(k, f, u, source="dataset"):
     return int(k.shape[0]), int(f.shape[1]), spatial_shape, coefficient_shape
 
 
+def _prepare_fixed_context_indices(
+    fixed_context_indices, n_context, n_pairs, source="dataset"
+):
+    if fixed_context_indices is None:
+        return None, None
+
+    if torch.is_tensor(fixed_context_indices):
+        if fixed_context_indices.ndim != 1:
+            raise ValueError(f"fixed_context_indices in {source} must be one-dimensional.")
+        if fixed_context_indices.dtype not in {
+            torch.uint8,
+            torch.int8,
+            torch.int16,
+            torch.int32,
+            torch.int64,
+        }:
+            raise TypeError(f"fixed_context_indices in {source} must contain integers.")
+        context_indices = fixed_context_indices.detach().to(
+            device="cpu", dtype=torch.long
+        ).clone()
+    else:
+        values = list(fixed_context_indices)
+        if not all(isinstance(value, int) for value in values):
+            raise TypeError(f"fixed_context_indices in {source} must contain integers.")
+        context_indices = torch.tensor(values, dtype=torch.long)
+
+    if len(context_indices) != n_context:
+        raise ValueError(
+            f"fixed_context_indices in {source} must contain exactly n_context="
+            f"{n_context} entries, got {len(context_indices)}."
+        )
+    if len(torch.unique(context_indices)) != len(context_indices):
+        raise ValueError(f"fixed_context_indices in {source} must not contain duplicates.")
+    if torch.any(context_indices < 0) or torch.any(context_indices >= n_pairs):
+        raise ValueError(
+            f"fixed_context_indices in {source} must lie in [0, {n_pairs - 1}]."
+        )
+
+    query_mask = torch.ones(n_pairs, dtype=torch.bool)
+    query_mask[context_indices] = False
+    query_indices = torch.arange(n_pairs, dtype=torch.long)[query_mask]
+    return context_indices, query_indices
+
+
 class MultiOperatorDarcyDataset(Dataset):
     """Episodic dataset for in-context learning of Darcy operators.
 
@@ -111,6 +155,8 @@ class MultiOperatorDarcyDataset(Dataset):
 
     Each item samples one operator and returns ``n_context`` input-output
     examples plus one query pair, in the format expected by ``FNOSets``.
+    When ``fixed_context_indices`` is provided, those pairs are always used as
+    context and queries are selected from the remaining pairs.
     """
 
     def __init__(
@@ -124,6 +170,7 @@ class MultiOperatorDarcyDataset(Dataset):
         random_context: bool = True,
         include_k: bool = False,
         operator_direction: str = "f_to_u",
+        fixed_context_indices: Optional[Union[Sequence[int], torch.Tensor]] = None,
     ):
         super().__init__()
 
@@ -144,6 +191,18 @@ class MultiOperatorDarcyDataset(Dataset):
         self.random_context = random_context
         self.include_k = include_k
         self.operator_direction = operator_direction
+        self.fixed_context_indices, self.query_indices = (
+            _prepare_fixed_context_indices(
+                fixed_context_indices,
+                n_context=self.n_context,
+                n_pairs=self.n_pairs,
+            )
+        )
+        self.n_query_pairs = (
+            self.n_pairs
+            if self.query_indices is None
+            else len(self.query_indices)
+        )
 
         if self.operator_direction not in {"f_to_u", "u_to_f"}:
             raise ValueError(
@@ -158,6 +217,15 @@ class MultiOperatorDarcyDataset(Dataset):
         return self.n_samples
 
     def _sample_pair_indices(self, index):
+        if self.fixed_context_indices is not None:
+            if self.random_context:
+                query_position = torch.randint(self.n_query_pairs, size=())
+            else:
+                query_position = (
+                    index // len(self.operator_indices)
+                ) % self.n_query_pairs
+            return self.fixed_context_indices, self.query_indices[query_position]
+
         if self.random_context:
             perm = torch.randperm(self.n_pairs)
             query_idx = perm[0]
@@ -223,12 +291,15 @@ def load_multiop_darcy(
     include_k: bool = False,
     operator_direction: str = "f_to_u",
     num_workers: int = 0,
+    fixed_context_indices: Optional[Union[Sequence[int], torch.Tensor]] = None,
 ):
     """Load an episodic Darcy dataset for ``FNOSets`` training.
 
     The ``.pt`` file at ``data_path`` must contain keys ``k``, ``f``, and ``u``.
     Operators are split contiguously: the first ``n_train_operators`` are used
     for training, and the next ``n_test_operators`` are used for testing.
+    By default, context pairs retain the original random/deterministic behavior.
+    Pass ``fixed_context_indices`` to reserve specific pairs as context.
     """
     data_path = Path(data_path)
     data = torch.load(data_path.as_posix(), weights_only=False)
@@ -268,10 +339,11 @@ def load_multiop_darcy(
         random_context=True,
         include_k=include_k,
         operator_direction=operator_direction,
+        fixed_context_indices=fixed_context_indices,
     )
 
     if n_test_samples is None:
-        n_test_samples = n_test_operators * f.shape[1]
+        n_test_samples = n_test_operators * train_db.n_query_pairs
     test_db = MultiOperatorDarcyDataset(
         k=k,
         f=f,
@@ -282,6 +354,7 @@ def load_multiop_darcy(
         random_context=False,
         include_k=include_k,
         operator_direction=operator_direction,
+        fixed_context_indices=fixed_context_indices,
     )
 
     train_u = u[train_operator_indices].reshape(-1, 1, *u.shape[2:]).float()

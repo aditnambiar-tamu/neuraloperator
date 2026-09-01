@@ -11,6 +11,7 @@ from torch.utils.data import DataLoader, Dataset, Sampler
 from ..transforms.normalizers import UnitGaussianNormalizer
 from .multioperator_darcy import (
     MultiOperatorDarcyDataProcessor,
+    _prepare_fixed_context_indices,
     _validate_multioperator_tensors,
 )
 
@@ -145,6 +146,7 @@ class ChunkedMultiOperatorDarcyDataset(Dataset):
 
     Integer indices support ordinary random access. ChunkAwareBatchSampler
     supplies (chunk, episode) indices so consecutive batches use one chunk.
+    Fixed context indices may be reserved across every operator and chunk.
     """
 
     def __init__(
@@ -155,6 +157,7 @@ class ChunkedMultiOperatorDarcyDataset(Dataset):
         random_context: bool = True,
         include_k: bool = False,
         operator_direction: str = "f_to_u",
+        fixed_context_indices: Optional[Union[Sequence[int], torch.Tensor]] = None,
     ):
         super().__init__()
         if not chunk_paths:
@@ -205,9 +208,23 @@ class ChunkedMultiOperatorDarcyDataset(Dataset):
                 f"and n_pairs={self.n_pairs}."
             )
 
+        self.fixed_context_indices, self.query_indices = (
+            _prepare_fixed_context_indices(
+                fixed_context_indices,
+                n_context=self.n_context,
+                n_pairs=self.n_pairs,
+                source="chunked dataset",
+            )
+        )
+        self.n_query_pairs = (
+            self.n_pairs
+            if self.query_indices is None
+            else len(self.query_indices)
+        )
+
         self.n_operators = sum(self.chunk_sizes)
         if n_samples == "all_queries":
-            self.n_samples = self.n_operators * self.n_pairs
+            self.n_samples = self.n_operators * self.n_query_pairs
         elif n_samples is None:
             self.n_samples = self.n_operators
         else:
@@ -274,6 +291,16 @@ class ChunkedMultiOperatorDarcyDataset(Dataset):
 
     def _sample_pair_indices(self, local_episode, n_operators):
         operator_index = local_episode % n_operators
+        if self.fixed_context_indices is not None:
+            if self.random_context:
+                query_position = torch.randint(self.n_query_pairs, size=())
+            else:
+                query_position = (
+                    local_episode // n_operators
+                ) % self.n_query_pairs
+            query_index = int(self.query_indices[query_position])
+            return operator_index, self.fixed_context_indices, query_index
+
         if self.random_context:
             permutation = torch.randperm(self.n_pairs)
             query_index = int(permutation[0])
@@ -470,12 +497,14 @@ def load_chunked_multiop_darcy(
     num_workers: int = 0,
     pin_memory: bool = False,
     seed: int = 0,
+    fixed_context_indices: Optional[Union[Sequence[int], torch.Tensor]] = None,
 ):
     """Load chunked Darcy data with explicit train/validation/test splits.
 
     Splits may use contiguous counts in sorted filename order or three explicit
     selections. Explicit integers index the sorted files; names and paths work
-    as well.
+    as well. When fixed context indices are supplied, validation and test
+    queries cycle through only the remaining pair indices.
 
     Returns the train loader, a validation dictionary keyed by val, the final
     test loader, and the data processor.
@@ -511,6 +540,7 @@ def load_chunked_multiop_darcy(
         random_context=True,
         include_k=include_k,
         operator_direction=operator_direction,
+        fixed_context_indices=fixed_context_indices,
     )
     val_dataset = ChunkedMultiOperatorDarcyDataset(
         val_paths,
@@ -519,6 +549,7 @@ def load_chunked_multiop_darcy(
         random_context=False,
         include_k=include_k,
         operator_direction=operator_direction,
+        fixed_context_indices=fixed_context_indices,
     )
     test_dataset = ChunkedMultiOperatorDarcyDataset(
         test_paths,
@@ -527,6 +558,7 @@ def load_chunked_multiop_darcy(
         random_context=False,
         include_k=include_k,
         operator_direction=operator_direction,
+        fixed_context_indices=fixed_context_indices,
     )
 
     input_field, output_field = (
