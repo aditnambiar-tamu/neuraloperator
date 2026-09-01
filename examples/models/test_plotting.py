@@ -100,8 +100,25 @@ def plot_fnosets_prediction_2d(
     title="FNOSets query prediction",
     save_path=None,
     print_errors=True,
+    plot_k=False,
 ):
-    """Plot 2D FNOSets prediction and ground truth for one episodic sample."""
+    """Plot a 2D prediction, optionally including a scalar coefficient field."""
+    coefficient = None
+    if plot_k:
+        raw_sample = dataset[index]
+        if "k" not in raw_sample:
+            raise ValueError(
+                "plot_k=True requires a dataset created with include_k=True."
+            )
+        coefficient = raw_sample["k"]
+        if coefficient.ndim != 3 or coefficient.shape[0] != 1:
+            raise ValueError(
+                "plot_k=True supports scalar 2D coefficient fields with shape "
+                f"(1, H, W), got {tuple(coefficient.shape)}. Set plot_k=False "
+                "for tensor-valued coefficients."
+            )
+        coefficient = coefficient[0].detach().cpu()
+
     pred, truth = _predict_fnosets_sample(
         model=model,
         dataset=dataset,
@@ -114,19 +131,36 @@ def plot_fnosets_prediction_2d(
     vmin = min(pred.min().item(), truth.min().item())
     vmax = max(pred.max().item(), truth.max().item())
 
-    fig, axes = plt.subplots(1, 3, figsize=(12, 4))
-    im = axes[0].imshow(truth, origin="lower", vmin=vmin, vmax=vmax)
-    axes[0].set_title("Ground truth")
-    axes[1].imshow(pred, origin="lower", vmin=vmin, vmax=vmax)
-    axes[1].set_title("Prediction")
-    axes[2].imshow((pred - truth).abs(), origin="lower")
-    axes[2].set_title("Absolute error")
+    n_panels = 4 if plot_k else 3
+    fig, axes = plt.subplots(1, n_panels, figsize=(4 * n_panels, 4))
+    solution_start = 0
+    if plot_k:
+        coefficient_image = axes[0].imshow(coefficient, origin="lower")
+        axes[0].set_title("Coefficient k")
+        fig.colorbar(coefficient_image, ax=axes[0], shrink=0.75)
+        solution_start = 1
+
+    solution_image = axes[solution_start].imshow(
+        truth, origin="lower", vmin=vmin, vmax=vmax
+    )
+    axes[solution_start].set_title("Ground truth")
+    axes[solution_start + 1].imshow(pred, origin="lower", vmin=vmin, vmax=vmax)
+    axes[solution_start + 1].set_title("Prediction")
+    error_image = axes[solution_start + 2].imshow(
+        (pred - truth).abs(), origin="lower"
+    )
+    axes[solution_start + 2].set_title("Absolute error")
 
     for ax in axes:
         ax.set_xticks([])
         ax.set_yticks([])
 
-    fig.colorbar(im, ax=axes[:2], shrink=0.75)
+    fig.colorbar(
+        solution_image,
+        ax=axes[solution_start : solution_start + 2],
+        shrink=0.75,
+    )
+    fig.colorbar(error_image, ax=axes[solution_start + 2], shrink=0.75)
     fig.suptitle(title)
     fig.tight_layout()
     if save_path is not None:
