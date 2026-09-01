@@ -9,7 +9,10 @@ import torch
 from torch.utils.data import DataLoader, Dataset, Sampler
 
 from ..transforms.normalizers import UnitGaussianNormalizer
-from .multioperator_darcy import MultiOperatorDarcyDataProcessor
+from .multioperator_darcy import (
+    MultiOperatorDarcyDataProcessor,
+    _validate_multioperator_tensors,
+)
 
 
 PathLike = Union[str, Path]
@@ -36,22 +39,9 @@ def _validate_chunk(chunk, path):
     if missing:
         raise KeyError(f"Chunk {path} is missing required keys {missing}.")
 
-    k, f, u = chunk["k"], chunk["f"], chunk["u"]
-    if not all(torch.is_tensor(value) for value in (k, f, u)):
-        raise TypeError(f"Chunk {path} values k, f, and u must be tensors.")
-    if k.ndim not in (2, 3):
-        raise ValueError(
-            f"Chunk {path} must contain 1D or 2D fields, got k.shape={k.shape}."
-        )
-    if f.ndim != k.ndim + 1 or u.ndim != k.ndim + 1:
-        raise ValueError(f"Chunk {path} has incompatible k/f/u dimensions.")
-    if f.shape != u.shape:
-        raise ValueError(f"Chunk {path} has different f and u shapes.")
-    if k.shape[0] != f.shape[0] or k.shape[1:] != f.shape[2:]:
-        raise ValueError(f"Chunk {path} has inconsistent operator or spatial shapes.")
-    if k.shape[0] == 0 or f.shape[1] == 0:
-        raise ValueError(f"Chunk {path} is empty.")
-    return int(k.shape[0]), int(f.shape[1]), tuple(k.shape[1:])
+    return _validate_multioperator_tensors(
+        chunk["k"], chunk["f"], chunk["u"], source=f"chunk {path}"
+    )
 
 
 def _discover_chunks(chunk_dir, chunk_pattern):
@@ -188,15 +178,23 @@ class ChunkedMultiOperatorDarcyDataset(Dataset):
         self.chunk_sizes = []
         self.n_pairs = None
         self.spatial_shape = None
+        self.coefficient_shape = None
 
         # Initialization examines one chunk at a time and retains only metadata.
         for path in self.chunk_paths:
             chunk = _load_chunk(path)
-            n_operators, n_pairs, spatial_shape = _validate_chunk(chunk, path)
+            n_operators, n_pairs, spatial_shape, coefficient_shape = _validate_chunk(
+                chunk, path
+            )
             if self.n_pairs is None:
                 self.n_pairs = n_pairs
                 self.spatial_shape = spatial_shape
-            elif n_pairs != self.n_pairs or spatial_shape != self.spatial_shape:
+                self.coefficient_shape = coefficient_shape
+            elif (
+                n_pairs != self.n_pairs
+                or spatial_shape != self.spatial_shape
+                or coefficient_shape != self.coefficient_shape
+            ):
                 raise ValueError(f"Chunk {path} is incompatible with earlier chunks.")
             self.chunk_sizes.append(n_operators)
             del chunk

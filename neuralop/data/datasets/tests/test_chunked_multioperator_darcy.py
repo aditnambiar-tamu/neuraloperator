@@ -5,6 +5,7 @@ import torch
 
 from neuralop.data.datasets import (
     ChunkedMultiOperatorDarcyDataset,
+    MultiOperatorDarcyDataset,
     load_chunked_multiop_darcy,
 )
 
@@ -22,6 +23,22 @@ def _write_chunk(path, value, spatial_shape=(5,), n_operators=2, n_pairs=4):
             "f": f,
             "u": f + 100,
             "operator_start": value * n_operators,
+        },
+        path,
+    )
+
+
+def _write_tensor_coefficient_chunk(
+    path, value, spatial_shape=(3, 4), n_operators=2, n_pairs=4
+):
+    shape = (n_operators, n_pairs, *spatial_shape)
+    torch.save(
+        {
+            "k": torch.full(
+                (n_operators, *spatial_shape, 2, 2), float(value + 1)
+            ),
+            "f": torch.full(shape, float(value)),
+            "u": torch.full(shape, float(value + 100)),
         },
         path,
     )
@@ -124,6 +141,64 @@ def test_shapes_direction_and_include_k_for_1d_and_2d(tmp_path):
     assert sample["k"].shape == (2, 1, 3, 4)
     assert torch.all(sample["u_context"] >= 100)
     assert torch.all(sample["f_context"] < 100)
+
+
+def test_tensor_coefficients_preserve_forward_sample_shapes(tmp_path):
+    for index in range(3):
+        _write_tensor_coefficient_chunk(tmp_path / f"chunk_{index}.pt", index)
+
+    train_loader, _, _, _ = load_chunked_multiop_darcy(
+        chunk_dir=tmp_path,
+        n_context=2,
+        batch_size=2,
+        n_train_chunks=1,
+        n_val_chunks=1,
+        n_test_chunks=1,
+        n_train_samples=2,
+        n_val_samples=2,
+        n_test_samples=2,
+        encode_input=False,
+        encode_output=False,
+        include_k=True,
+    )
+    sample = next(iter(train_loader))
+
+    assert train_loader.dataset.spatial_shape == (3, 4)
+    assert train_loader.dataset.coefficient_shape == (2, 2)
+    assert sample["u_context"].shape == (2, 2, 1, 3, 4)
+    assert sample["f_context"].shape == (2, 2, 1, 3, 4)
+    assert sample["u_query"].shape == (2, 1, 3, 4)
+    assert sample["y"].shape == (2, 1, 3, 4)
+    assert sample["k"].shape == (2, 1, 3, 4, 2, 2)
+
+
+def test_in_memory_dataset_accepts_tensor_coefficients():
+    k = torch.ones(3, 3, 4, 2, 2)
+    f = torch.ones(3, 4, 3, 4)
+    dataset = MultiOperatorDarcyDataset(
+        k=k,
+        f=f,
+        u=f + 1,
+        operator_indices=torch.arange(3),
+        n_context=2,
+        random_context=False,
+        include_k=True,
+    )
+
+    sample = dataset[0]
+    assert sample["u_query"].shape == (1, 3, 4)
+    assert sample["k"].shape == (1, 3, 4, 2, 2)
+
+
+def test_chunks_cannot_mix_scalar_and_tensor_coefficients(tmp_path):
+    _write_chunk(tmp_path / "chunk_0.pt", 0, spatial_shape=(3, 4))
+    _write_tensor_coefficient_chunk(tmp_path / "chunk_1.pt", 1)
+
+    with pytest.raises(ValueError, match="incompatible with earlier chunks"):
+        ChunkedMultiOperatorDarcyDataset(
+            [tmp_path / "chunk_0.pt", tmp_path / "chunk_1.pt"],
+            n_context=2,
+        )
 
 
 def test_validation_is_deterministic(chunk_dir):

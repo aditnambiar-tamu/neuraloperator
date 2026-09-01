@@ -54,12 +54,58 @@ class MultiOperatorDarcyDataProcessor(DataProcessor):
         return output, data_dict
 
 
+def _validate_multioperator_tensors(k, f, u, source="dataset"):
+    """Validate scalar- or tensor-coefficient Darcy data shapes.
+
+    The forcing and solution determine the spatial dimensionality. Coefficients
+    may be scalar fields or channel-last square tensor fields.
+    """
+    if not all(torch.is_tensor(value) for value in (k, f, u)):
+        raise TypeError(f"Expected k, f, and u in {source} to be tensors.")
+    if f.ndim not in (3, 4) or u.ndim not in (3, 4):
+        raise ValueError(
+            "Expected f and u to contain 1D or 2D fields with shape "
+            f"(n_operators, n_pairs, *spatial_shape), got {f.shape} and {u.shape}."
+        )
+    if f.shape != u.shape:
+        raise ValueError(
+            f"Expected f and u in {source} to have matching shapes, "
+            f"got {f.shape} and {u.shape}."
+        )
+
+    spatial_shape = tuple(f.shape[2:])
+    spatial_ndim = len(spatial_shape)
+    coefficient_prefix = (f.shape[0], *spatial_shape)
+    if (
+        k.ndim < spatial_ndim + 1
+        or tuple(k.shape[: spatial_ndim + 1]) != coefficient_prefix
+    ):
+        raise ValueError(
+            f"Expected k in {source} to agree with f and u on operator count and "
+            f"spatial shape {spatial_shape}, got k={k.shape}, f={f.shape}, u={u.shape}."
+        )
+
+    coefficient_shape = tuple(k.shape[spatial_ndim + 1 :])
+    expected_tensor_shape = (spatial_ndim, spatial_ndim)
+    if coefficient_shape not in ((), expected_tensor_shape):
+        raise ValueError(
+            f"Expected k in {source} to be a scalar field or a channel-last "
+            f"{expected_tensor_shape} tensor field, got trailing shape "
+            f"{coefficient_shape}."
+        )
+    if k.shape[0] == 0 or f.shape[1] == 0:
+        raise ValueError(f"Expected {source} to contain at least one operator and pair.")
+
+    return int(k.shape[0]), int(f.shape[1]), spatial_shape, coefficient_shape
+
+
 class MultiOperatorDarcyDataset(Dataset):
     """Episodic dataset for in-context learning of Darcy operators.
 
     Expected raw tensor shapes are:
 
-    - ``k``: ``(n_operators, *spatial_shape)``
+    - scalar ``k``: ``(n_operators, *spatial_shape)``
+    - tensor ``k``: ``(n_operators, *spatial_shape, n_dim, n_dim)``
     - ``f``: ``(n_operators, n_pairs, *spatial_shape)``
     - ``u``: ``(n_operators, n_pairs, *spatial_shape)``
 
@@ -81,22 +127,7 @@ class MultiOperatorDarcyDataset(Dataset):
     ):
         super().__init__()
 
-        if k.ndim < 2:
-            raise ValueError(
-                f"Expected k to have shape (n_operators, *spatial_shape), got {k.shape}."
-            )
-        if f.ndim != k.ndim + 1 or u.ndim != k.ndim + 1:
-            raise ValueError(
-                "Expected f and u to have shape (n_operators, n_pairs, *spatial_shape), "
-                f"got {f.shape} and {u.shape}."
-            )
-        if f.shape != u.shape:
-            raise ValueError(f"Expected f and u to have matching shapes, got {f.shape} and {u.shape}.")
-        if k.shape[0] != f.shape[0] or k.shape[1:] != f.shape[2:]:
-            raise ValueError(
-                "Expected k, f, and u to agree on operator count and spatial shape, "
-                f"got k={k.shape}, f={f.shape}, u={u.shape}."
-            )
+        _validate_multioperator_tensors(k, f, u)
         if f.shape[1] < n_context + 1:
             raise ValueError(
                 f"Need at least n_context + 1 pairs per operator, got n_context={n_context} "
