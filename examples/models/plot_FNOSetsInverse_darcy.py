@@ -18,6 +18,7 @@ from neuralop import Trainer
 from neuralop.training import AdamW
 from neuralop.training.training_state import load_training_state
 from neuralop.data.datasets import (
+    RelativeFrobeniusLoss,
     build_fnosets_inverse_data_processor,
     load_chunked_multiop_darcy,
     save_fnosets_inverse_data_processor,
@@ -90,24 +91,43 @@ def plot_fnosets_inverse_prediction_2d(
         pred = model(**sample)
         pred, sample = data_processor.postprocess(pred, sample)
 
-    pred = pred[0, 0].detach().cpu()
-    truth = sample["y"][0, 0].detach().cpu()
-    vmin = min(pred.min().item(), truth.min().item())
-    vmax = max(pred.max().item(), truth.max().item())
+    pred = pred[0].detach().cpu()
+    truth = sample["y"][0].detach().cpu()
+    component_names = data_processor.coefficient_components
+    if pred.shape[0] != len(component_names):
+        raise ValueError(
+            f"Expected {len(component_names)} coefficient channels, got "
+            f"{pred.shape[0]}."
+        )
 
-    fig, axes = plt.subplots(1, 3, figsize=(12, 4))
-    im = axes[0].imshow(truth, origin="lower", vmin=vmin, vmax=vmax)
-    axes[0].set_title("Ground truth k")
-    axes[1].imshow(pred, origin="lower", vmin=vmin, vmax=vmax)
-    axes[1].set_title("Prediction")
-    axes[2].imshow((pred - truth).abs(), origin="lower")
-    axes[2].set_title("Absolute error")
+    fig, axes = plt.subplots(
+        len(component_names),
+        3,
+        figsize=(12, 3.5 * len(component_names)),
+        squeeze=False,
+    )
+    for row, component_name in enumerate(component_names):
+        component_pred = pred[row]
+        component_truth = truth[row]
+        vmin = min(component_pred.min().item(), component_truth.min().item())
+        vmax = max(component_pred.max().item(), component_truth.max().item())
+        truth_image = axes[row, 0].imshow(
+            component_truth, origin="lower", vmin=vmin, vmax=vmax
+        )
+        axes[row, 0].set_title(f"Ground truth {component_name}")
+        axes[row, 1].imshow(component_pred, origin="lower", vmin=vmin, vmax=vmax)
+        axes[row, 1].set_title(f"Prediction {component_name}")
+        error_image = axes[row, 2].imshow(
+            (component_pred - component_truth).abs(), origin="lower"
+        )
+        axes[row, 2].set_title(f"Absolute error {component_name}")
+        fig.colorbar(truth_image, ax=axes[row, :2], shrink=0.75)
+        fig.colorbar(error_image, ax=axes[row, 2], shrink=0.75)
 
-    for ax in axes:
+    for ax in axes.ravel():
         ax.set_xticks([])
         ax.set_yticks([])
 
-    fig.colorbar(im, ax=axes[:2], shrink=0.75)
     fig.suptitle(title)
     fig.tight_layout()
     if save_path is not None:
@@ -135,10 +155,12 @@ def train_chunked_fnosets_inverse(
     hidden_channels=256,
     n_epochs=30,
     eval_interval=5,
+    periodic_in_x=True,
+    periodic_in_y=True,
     checkpoint_dir="./ckpt/fnosets_inverse_darcy",
     device=None,
 ):
-    """Train scalar FNOSetsInverse with memory-bounded chunked data.
+    """Train scalar or symmetric-tensor FNOSetsInverse on chunked data.
 
     When contexts are fixed, changing the loader's unused query pair does not
     change an inverse example. Choose validation and test sample counts with
@@ -178,12 +200,17 @@ def train_chunked_fnosets_inverse(
         base_data_processor,
         train_loader.dataset,
     ).to(device)
+    if data_processor.spatial_ndim != spatial_dim:
+        raise ValueError(
+            f"n_modes has {spatial_dim} dimensions, but the dataset has "
+            f"{data_processor.spatial_ndim} spatial dimensions."
+        )
 
     model = FNOSetsInverse(
         n_modes=n_modes,
         in_channels=1,
         out_channels=1,
-        coefficient_channels=1,
+        coefficient_channels=data_processor.coefficient_channels,
         hidden_channels=hidden_channels,
         encoder_layers=4,
         decoder_layers=4,
@@ -200,11 +227,20 @@ def train_chunked_fnosets_inverse(
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=n_epochs
     )
-    h1loss = H1Loss(d=spatial_dim)
+    h1loss = H1Loss(
+        d=spatial_dim,
+        periodic_in_x=periodic_in_x,
+        periodic_in_y=periodic_in_y,
+    )
     eval_losses = {
         "h1": h1loss,
         "l2": LpLoss(d=spatial_dim, p=2),
     }
+    if data_processor.coefficient_representation == "symmetric_2d":
+        eval_losses["frobenius"] = RelativeFrobeniusLoss()
+        checkpoint_metric = "val_frobenius"
+    else:
+        checkpoint_metric = "val_h1"
 
     trainer = Trainer(
         model=model,
@@ -223,10 +259,45 @@ def train_chunked_fnosets_inverse(
         data_processor,
         checkpoint_dir / "data_processor.pt",
         metadata={
-            "training_chunks": [
-                str(path) for path in train_loader.dataset.chunk_paths
-            ],
-            "operator_direction": "f_to_u",
+            "schema_version": 1,
+            "spatial_dim": spatial_dim,
+            "h1": {
+                "periodic_in_x": periodic_in_x,
+                "periodic_in_y": periodic_in_y,
+            },
+            # These settings rebuild the exact splits for evaluation with the
+            # saved processor, so forward normalizers need not be fitted again.
+            "evaluation_loader": {
+                "chunk_pattern": chunk_pattern,
+                "train_chunks": [
+                    path.name for path in train_loader.dataset.chunk_paths
+                ],
+                "val_chunks": [
+                    path.name for path in val_loaders["val"].dataset.chunk_paths
+                ],
+                "test_chunks": [
+                    path.name for path in final_test_loader.dataset.chunk_paths
+                ],
+                "n_context": n_context,
+                "fixed_context_indices": (
+                    None
+                    if fixed_context_indices is None
+                    else (
+                        fixed_context_indices.tolist()
+                        if torch.is_tensor(fixed_context_indices)
+                        else list(fixed_context_indices)
+                    )
+                ),
+                "batch_size": batch_size,
+                "test_batch_size": test_batch_size,
+                "n_train_samples": n_train_samples,
+                "n_val_samples": n_val_samples,
+                "n_test_samples": n_test_samples,
+                "include_k": True,
+                "operator_direction": "f_to_u",
+                "encode_input": False,
+                "encode_output": False,
+            },
         },
     )
 
@@ -238,7 +309,7 @@ def train_chunked_fnosets_inverse(
         regularizer=False,
         training_loss=h1loss,
         eval_losses=eval_losses,
-        save_best="val_h1",
+        save_best=checkpoint_metric,
         save_dir=checkpoint_dir,
     )
 

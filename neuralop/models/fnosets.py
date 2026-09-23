@@ -582,7 +582,9 @@ class FNOSetsInverse(BaseModel, name='FNOSetsInverse'):
 
     The model encodes each context pair independently, mixes the paired latent
     representation, mean-pools across the context set, and decodes the pooled
-    latent field into the coefficient function.
+    latent field into the coefficient function. Use ``coefficient_channels=1``
+    for scalar coefficients or ``coefficient_channels=3`` with the inverse
+    data processor's symmetric 2D ``(K11, K22, K12)`` representation.
     """
 
     def __init__(
@@ -755,6 +757,15 @@ class FNOSetsInverse(BaseModel, name='FNOSetsInverse'):
                 "Expected u_context and f_context to agree on batch and context dimensions, "
                 f"got {u_context.shape[:2]} and {f_context.shape[:2]}."
             )
+        if y is not None and (
+            y.ndim < 2 or y.shape[1] != self.coefficient_channels
+        ):
+            target_channels = y.shape[1] if y.ndim >= 2 else None
+            raise ValueError(
+                "FNOSetsInverse target channels must match coefficient_channels; "
+                f"model expects {self.coefficient_channels}, target has "
+                f"{target_channels}."
+            )
 
         batch_size, n_context = u_context.shape[:2]
         u_context_shape = u_context.shape[2:]
@@ -777,7 +788,13 @@ class FNOSetsInverse(BaseModel, name='FNOSetsInverse'):
         )
         h_agg = h_context.mean(dim=1)
 
-        return self.decoder(h_agg, output_shape=decoder_output_shape)
+        output = self.decoder(h_agg, output_shape=decoder_output_shape)
+        if y is not None and output.shape != y.shape:
+            raise ValueError(
+                "FNOSetsInverse output and target shapes must match; got "
+                f"output={tuple(output.shape)} and target={tuple(y.shape)}."
+            )
+        return output
 
     @property
     def n_modes(self):

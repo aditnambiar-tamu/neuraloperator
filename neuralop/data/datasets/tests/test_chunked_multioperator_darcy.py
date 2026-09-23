@@ -40,11 +40,14 @@ def _write_tensor_coefficient_chunk(
     path, value, spatial_shape=(3, 4), n_operators=2, n_pairs=4
 ):
     shape = (n_operators, n_pairs, *spatial_shape)
+    k = torch.empty(n_operators, *spatial_shape, 2, 2)
+    k[..., 0, 0] = float(value + 2)
+    k[..., 1, 1] = float(value + 3)
+    k[..., 0, 1] = float(0.1 * (value + 1))
+    k[..., 1, 0] = k[..., 0, 1]
     torch.save(
         {
-            "k": torch.full(
-                (n_operators, *spatial_shape, 2, 2), float(value + 1)
-            ),
+            "k": k,
             "f": torch.full(shape, float(value)),
             "u": torch.full(shape, float(value + 100)),
         },
@@ -576,7 +579,7 @@ def test_in_memory_coefficient_normalizer_uses_selected_operators():
     )
 
 
-def test_scalar_inverse_utilities_reject_tensor_coefficients(tmp_path):
+def test_inverse_utilities_auto_infer_symmetric_tensor_coefficients(tmp_path):
     for index in range(3):
         _write_tensor_coefficient_chunk(tmp_path / f"chunk_{index}.pt", index)
     train_loader, _, _, _ = load_chunked_multiop_darcy(
@@ -589,8 +592,14 @@ def test_scalar_inverse_utilities_reject_tensor_coefficients(tmp_path):
         include_k=True,
     )
 
-    with pytest.raises(ValueError, match="require scalar k fields"):
-        fit_coefficient_normalizer(train_loader.dataset)
+    normalizer = fit_coefficient_normalizer(train_loader.dataset)
+
+    assert normalizer.mean.shape == (1, 3, 1, 1)
+    assert normalizer.std.shape == (1, 3, 1, 1)
+    assert torch.allclose(
+        normalizer.mean[:, :, 0, 0],
+        torch.tensor([[2.0, 3.0, 0.1]]),
+    )
 
 
 def test_inverse_processor_replaces_query_target_with_k(chunk_dir):

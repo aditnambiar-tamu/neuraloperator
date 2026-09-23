@@ -9,12 +9,20 @@ from .chunked_multioperator_darcy import (
     load_chunked_multiop_darcy,
 )
 from .fnosets_inverse import (
+    SCALAR_COEFFICIENT_REPRESENTATION,
+    SYMMETRIC_2D_COEFFICIENT_REPRESENTATION,
+    SYMMETRIC_2D_COMPONENTS,
     CoefficientTargetDataset,
     FNOSetsInverseDataProcessor,
+    RelativeFrobeniusLoss,
     build_fnosets_inverse_data_processor,
+    channels_to_symmetric_tensor,
     fit_coefficient_normalizer,
     load_fnosets_inverse_data_processor,
+    relative_frobenius_error,
     save_fnosets_inverse_data_processor,
+    smallest_symmetric_eigenvalue,
+    symmetric_tensor_to_channels,
     wrap_fnosets_inverse_loader,
     wrap_fnosets_inverse_loaders,
 )
