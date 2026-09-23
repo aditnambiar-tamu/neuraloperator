@@ -3,67 +3,13 @@ import random
 
 import torch
 
-from neuralop.models.fnosets import FNOSetsInverse
+from neuralop.models import FNOSetsInverse
 from neuralop import LpLoss, H1Loss
-from neuralop.data.datasets import load_multiop_darcy
-from neuralop.data.transforms.data_processors import DataProcessor
-from neuralop.data.transforms.normalizers import UnitGaussianNormalizer
+from neuralop.data.datasets import (
+    build_fnosets_inverse_data_processor,
+    load_multiop_darcy,
+)
 from neuralop.training.training_state import load_training_state
-
-
-class FNOSetsInverseDataProcessor(DataProcessor):
-    def __init__(self, input_normalizer=None, output_normalizer=None, coefficient_normalizer=None):
-        super().__init__()
-        self.input_normalizer = input_normalizer
-        self.output_normalizer = output_normalizer
-        self.coefficient_normalizer = coefficient_normalizer
-        self.device = "cpu"
-        self.model = None
-
-    def to(self, device):
-        if self.input_normalizer is not None:
-            self.input_normalizer = self.input_normalizer.to(device)
-        if self.output_normalizer is not None:
-            self.output_normalizer = self.output_normalizer.to(device)
-        if self.coefficient_normalizer is not None:
-            self.coefficient_normalizer = self.coefficient_normalizer.to(device)
-        self.device = device
-        return self
-
-    def preprocess(self, data_dict, batched=True):
-        for key, value in data_dict.items():
-            if torch.is_tensor(value):
-                data_dict[key] = value.to(self.device)
-
-        if self.input_normalizer is not None:
-            data_dict["u_context"] = self.input_normalizer.transform(data_dict["u_context"])
-        if self.output_normalizer is not None:
-            data_dict["f_context"] = self.output_normalizer.transform(data_dict["f_context"])
-        if self.coefficient_normalizer is not None and self.training:
-            data_dict["y"] = self.coefficient_normalizer.transform(data_dict["y"])
-
-        return data_dict
-
-    def postprocess(self, output, data_dict):
-        if self.coefficient_normalizer is not None and not self.training:
-            output = self.coefficient_normalizer.inverse_transform(output)
-        return output, data_dict
-
-    def forward(self, **data_dict):
-        data_dict = self.preprocess(data_dict)
-        output = self.model(**data_dict)
-        output, data_dict = self.postprocess(output, data_dict)
-        return output, data_dict
-
-
-def fit_coefficient_normalizer(dataset):
-    operator_indices = dataset.operator_indices
-    train_k = dataset.k[operator_indices].unsqueeze(1).float()
-    reduce_dims = list(range(train_k.ndim))
-    reduce_dims.pop(1)
-    normalizer = UnitGaussianNormalizer(dim=reduce_dims)
-    normalizer.fit(train_k)
-    return normalizer
 
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -94,10 +40,9 @@ train_loader, _, base_data_processor = load_multiop_darcy(
     operator_direction="f_to_u",
 )
 
-data_processor = FNOSetsInverseDataProcessor(
-    input_normalizer=base_data_processor.in_normalizer,
-    output_normalizer=base_data_processor.out_normalizer,
-    coefficient_normalizer=fit_coefficient_normalizer(train_loader.dataset),
+data_processor = build_fnosets_inverse_data_processor(
+    base_data_processor,
+    train_loader.dataset,
 ).to(device)
 data_processor.eval()
 
@@ -156,7 +101,7 @@ for i, operator_idx in enumerate(operator_indices):
     sample = {
         "u_context": f_data[operator_idx, :n_context].unsqueeze(1).unsqueeze(0),
         "f_context": u_data[operator_idx, :n_context].unsqueeze(1).unsqueeze(0),
-        "y": k_data[operator_idx].unsqueeze(0).unsqueeze(0),
+        "k": k_data[operator_idx].unsqueeze(0).unsqueeze(0),
     }
 
     sample = data_processor.preprocess(sample)

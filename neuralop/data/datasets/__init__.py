@@ -8,6 +8,16 @@ from .chunked_multioperator_darcy import (
     ChunkedMultiOperatorDarcyDataset,
     load_chunked_multiop_darcy,
 )
+from .fnosets_inverse import (
+    CoefficientTargetDataset,
+    FNOSetsInverseDataProcessor,
+    build_fnosets_inverse_data_processor,
+    fit_coefficient_normalizer,
+    load_fnosets_inverse_data_processor,
+    save_fnosets_inverse_data_processor,
+    wrap_fnosets_inverse_loader,
+    wrap_fnosets_inverse_loaders,
+)
 from .navier_stokes import NavierStokesDataset, load_navier_stokes_pt
 from .pt_dataset import PTDataset
 from .burgers import Burgers1dTimeDataset, load_mini_burgers_1dtime

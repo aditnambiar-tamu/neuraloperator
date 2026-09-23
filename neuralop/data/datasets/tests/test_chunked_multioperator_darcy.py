@@ -3,11 +3,18 @@ from pathlib import Path
 import pytest
 import torch
 
+from neuralop.models import FNOSetsInverse
 from neuralop.data.datasets import (
     ChunkedMultiOperatorDarcyDataset,
+    CoefficientTargetDataset,
     MultiOperatorDarcyDataset,
+    build_fnosets_inverse_data_processor,
+    fit_coefficient_normalizer,
     load_chunked_multiop_darcy,
+    load_fnosets_inverse_data_processor,
     load_multiop_darcy,
+    save_fnosets_inverse_data_processor,
+    wrap_fnosets_inverse_loader,
 )
 
 
@@ -477,3 +484,196 @@ def test_dataset_keeps_only_one_cached_chunk(chunk_dir):
 def test_num_workers_is_rejected(chunk_dir):
     with pytest.raises(ValueError, match="num_workers=0"):
         _load(chunk_dir, num_workers=1)
+
+
+def test_inverse_wrapper_preserves_chunk_sampler_and_uses_k_target(chunk_dir):
+    train_loader, _, _, _ = _load(
+        chunk_dir,
+        encode_input=False,
+        encode_output=False,
+        include_k=True,
+    )
+    wrapped_loader = wrap_fnosets_inverse_loader(train_loader)
+
+    assert isinstance(wrapped_loader.dataset, CoefficientTargetDataset)
+    assert wrapped_loader.batch_sampler is train_loader.batch_sampler
+    batch = next(iter(wrapped_loader))
+    assert torch.equal(batch["y"], batch["k"])
+
+    base_dataset = train_loader.dataset
+    base_dataset.clear_cache()
+    base_dataset.chunk_load_count = 0
+    list(wrapped_loader)
+    assert base_dataset.chunk_load_count == len(base_dataset.chunk_paths)
+
+
+def test_inverse_wrapper_requires_coefficients(chunk_dir):
+    train_loader, _, _, base_processor = _load(
+        chunk_dir,
+        encode_input=False,
+        encode_output=False,
+        include_k=False,
+    )
+
+    with pytest.raises(ValueError, match="include_k=True"):
+        wrap_fnosets_inverse_loader(train_loader)
+    with pytest.raises(ValueError, match="include_k=True"):
+        build_fnosets_inverse_data_processor(
+            base_processor,
+            train_loader.dataset,
+        )
+
+
+def test_chunked_coefficient_normalizer_uses_training_chunks_once(chunk_dir):
+    train_loader, _, _, _ = _load(
+        chunk_dir,
+        n_train_samples=1,
+        include_k=True,
+    )
+    normalizer = fit_coefficient_normalizer(train_loader.dataset)
+    train_k = torch.cat(
+        [
+            torch.load(path, weights_only=False)["k"]
+            for path in train_loader.dataset.chunk_paths
+        ]
+    ).unsqueeze(1)
+    reduce_dims = [0, 2]
+
+    assert normalizer.mean.shape == (1, 1, 1)
+    assert normalizer.std.shape == (1, 1, 1)
+    assert torch.allclose(
+        normalizer.mean,
+        train_k.mean(dim=reduce_dims, keepdim=True),
+    )
+    assert torch.allclose(
+        normalizer.std,
+        train_k.std(dim=reduce_dims, keepdim=True),
+    )
+    assert normalizer.mean.item() < 20
+
+
+def test_in_memory_coefficient_normalizer_uses_selected_operators():
+    k = torch.arange(15, dtype=torch.float32).reshape(3, 5)
+    f = torch.ones(3, 4, 5)
+    dataset = MultiOperatorDarcyDataset(
+        k=k,
+        f=f,
+        u=f + 1,
+        operator_indices=torch.tensor([0, 2]),
+        n_context=2,
+        include_k=True,
+    )
+    normalizer = fit_coefficient_normalizer(dataset)
+    selected_k = k[[0, 2]].unsqueeze(1)
+
+    assert torch.allclose(
+        normalizer.mean,
+        selected_k.mean(dim=[0, 2], keepdim=True),
+    )
+    assert torch.allclose(
+        normalizer.std,
+        selected_k.std(dim=[0, 2], keepdim=True),
+    )
+
+
+def test_scalar_inverse_utilities_reject_tensor_coefficients(tmp_path):
+    for index in range(3):
+        _write_tensor_coefficient_chunk(tmp_path / f"chunk_{index}.pt", index)
+    train_loader, _, _, _ = load_chunked_multiop_darcy(
+        chunk_dir=tmp_path,
+        n_context=2,
+        batch_size=1,
+        n_train_chunks=1,
+        n_val_chunks=1,
+        n_test_chunks=1,
+        include_k=True,
+    )
+
+    with pytest.raises(ValueError, match="require scalar k fields"):
+        fit_coefficient_normalizer(train_loader.dataset)
+
+
+def test_inverse_processor_replaces_query_target_with_k(chunk_dir):
+    train_loader, _, _, base_processor = _load(chunk_dir, include_k=True)
+    inverse_processor = build_fnosets_inverse_data_processor(
+        base_processor,
+        train_loader.dataset,
+    )
+    batch = next(iter(train_loader))
+    raw_k = batch["k"].clone()
+
+    inverse_processor.train()
+    processed = inverse_processor.preprocess(
+        {key: value.clone() for key, value in batch.items()}
+    )
+    expected = inverse_processor.coefficient_normalizer.transform(raw_k)
+    assert torch.allclose(processed["y"], expected)
+
+    inverse_processor.eval()
+    processed = inverse_processor.preprocess(
+        {key: value.clone() for key, value in batch.items()}
+    )
+    assert torch.equal(processed["y"], raw_k)
+
+
+def test_inverse_processor_normalizers_round_trip(chunk_dir, tmp_path):
+    train_loader, _, _, base_processor = _load(chunk_dir, include_k=True)
+    inverse_processor = build_fnosets_inverse_data_processor(
+        base_processor,
+        train_loader.dataset,
+    )
+    checkpoint_path = tmp_path / "inverse_processor.pt"
+    save_fnosets_inverse_data_processor(
+        inverse_processor,
+        checkpoint_path,
+        metadata={"split": "train"},
+    )
+
+    loaded_processor, metadata = load_fnosets_inverse_data_processor(
+        checkpoint_path
+    )
+
+    assert metadata == {"split": "train"}
+    for name in (
+        "input_normalizer",
+        "output_normalizer",
+        "coefficient_normalizer",
+    ):
+        expected = getattr(inverse_processor, name)
+        actual = getattr(loaded_processor, name)
+        assert torch.equal(actual.mean, expected.mean)
+        assert torch.equal(actual.std, expected.std)
+
+
+def test_chunked_inverse_batch_forward_and_backward(chunk_dir):
+    train_loader, _, _, base_processor = _load(
+        chunk_dir,
+        batch_size=2,
+        include_k=True,
+    )
+    inverse_processor = build_fnosets_inverse_data_processor(
+        base_processor,
+        train_loader.dataset,
+    )
+    inverse_processor.train()
+    batch = inverse_processor.preprocess(next(iter(train_loader)))
+    model = FNOSetsInverse(
+        n_modes=(2,),
+        in_channels=1,
+        out_channels=1,
+        coefficient_channels=1,
+        hidden_channels=4,
+        encoder_layers=1,
+        decoder_layers=1,
+        lifting_channel_ratio=1,
+        projection_channel_ratio=1,
+        channel_mlp_expansion=1.0,
+        enforce_hermitian_symmetry=False,
+    )
+
+    prediction = model(**batch)
+    loss = (prediction - batch["y"]).square().mean()
+    loss.backward()
+
+    assert prediction.shape == batch["k"].shape
+    assert any(parameter.grad is not None for parameter in model.parameters())
