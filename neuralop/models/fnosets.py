@@ -1,5 +1,5 @@
 from functools import partialmethod
-from typing import Tuple, List, Union, Literal
+from typing import Tuple, List, Union, Literal, Optional
 
 Number = Union[float, int]
 
@@ -806,3 +806,311 @@ class FNOSetsInverse(BaseModel, name='FNOSetsInverse'):
         self.f_context_encoder.n_modes = n_modes
         self.decoder.n_modes = n_modes
         self._n_modes = n_modes
+
+
+class FNOSetsCalderon(BaseModel, name="FNOSetsCalderon"):
+    """Recover a 2D coefficient field from paired 1D boundary traces.
+
+    Each context example contains one Dirichlet trace and its corresponding
+    Neumann trace. Separate 1D FNO encoders process the two traces, a pointwise
+    mixer combines each pair, and mean pooling over boundary locations and
+    context examples produces an operator-level representation. That vector is
+    broadcast over the coefficient grid, augmented with 2D grid coordinates,
+    and decoded into the coefficient field.
+
+    Boundary points are treated as an ordered, uniformly sampled 1D sequence.
+    The same point ordering must be used for every example and operator.
+    """
+
+    def __init__(
+        self,
+        boundary_n_modes: Tuple[int, ...] = (16,),
+        coefficient_n_modes: Tuple[int, ...] = (16, 16),
+        output_shape: Optional[Tuple[int, int]] = None,
+        f_boundary_channels: int = 1,
+        n_boundary_channels: int = 1,
+        coefficient_channels: int = 1,
+        hidden_channels: int = 128,
+        encoder_layers: int = 4,
+        decoder_layers: int = 4,
+        lifting_channel_ratio: Number = 2,
+        projection_channel_ratio: Number = 2,
+        positional_embedding: Union[str, nn.Module] = "grid",
+        non_linearity: nn.Module = F.gelu,
+        norm: Literal["ada_in", "group_norm", "instance_norm"] = None,
+        norm_groups: int = 1,
+        use_channel_mlp: bool = True,
+        channel_mlp_dropout: float = 0,
+        channel_mlp_expansion: float = 0.5,
+        channel_mlp_skip: Literal[
+            "linear", "identity", "soft-gating", None
+        ] = "soft-gating",
+        fno_skip: Literal["linear", "identity", "soft-gating", None] = "linear",
+        boundary_domain_padding: Union[Number, List[Number]] = None,
+        coefficient_domain_padding: Union[Number, List[Number]] = None,
+        fno_block_precision: str = "full",
+        stabilizer: str = None,
+        max_boundary_n_modes: Tuple[int, ...] = None,
+        max_coefficient_n_modes: Tuple[int, ...] = None,
+        factorization: str = None,
+        rank: float = 1.0,
+        fixed_rank_modes: bool = False,
+        implementation: str = "factorized",
+        decomposition_kwargs: dict = None,
+        separable: bool = False,
+        preactivation: bool = False,
+        conv_module: nn.Module = SpectralConv,
+        enforce_hermitian_symmetry: bool = True,
+    ):
+        if decomposition_kwargs is None:
+            decomposition_kwargs = {}
+        super().__init__()
+
+        if isinstance(boundary_n_modes, int):
+            boundary_n_modes = (boundary_n_modes,)
+        if isinstance(coefficient_n_modes, int):
+            coefficient_n_modes = (coefficient_n_modes, coefficient_n_modes)
+        if len(boundary_n_modes) != 1:
+            raise ValueError(
+                "boundary_n_modes must specify exactly one dimension for the "
+                f"1D boundary traces, got {boundary_n_modes}."
+            )
+        if len(coefficient_n_modes) != 2:
+            raise ValueError(
+                "coefficient_n_modes must specify two dimensions for the "
+                f"2D coefficient grid, got {coefficient_n_modes}."
+            )
+        if output_shape is not None:
+            output_shape = tuple(int(size) for size in output_shape)
+            if len(output_shape) != 2 or any(size < 1 for size in output_shape):
+                raise ValueError(
+                    "output_shape must contain two positive spatial sizes, "
+                    f"got {output_shape}."
+                )
+        if min(f_boundary_channels, n_boundary_channels, coefficient_channels) < 1:
+            raise ValueError("All input and output channel counts must be positive.")
+        if hidden_channels < 1 or encoder_layers < 1 or decoder_layers < 1:
+            raise ValueError(
+                "hidden_channels, encoder_layers, and decoder_layers must be positive."
+            )
+
+        self._boundary_n_modes = tuple(boundary_n_modes)
+        self._coefficient_n_modes = tuple(coefficient_n_modes)
+        self.output_shape = output_shape
+        self.f_boundary_channels = int(f_boundary_channels)
+        self.n_boundary_channels = int(n_boundary_channels)
+        self.coefficient_channels = int(coefficient_channels)
+        self.hidden_channels = int(hidden_channels)
+
+        encoder_kwargs = dict(
+            hidden_channels=hidden_channels,
+            n_layers=encoder_layers,
+            lifting_channel_ratio=lifting_channel_ratio,
+            positional_embedding=positional_embedding,
+            non_linearity=non_linearity,
+            norm=norm,
+            norm_groups=norm_groups,
+            use_channel_mlp=use_channel_mlp,
+            channel_mlp_dropout=channel_mlp_dropout,
+            channel_mlp_expansion=channel_mlp_expansion,
+            channel_mlp_skip=channel_mlp_skip,
+            fno_skip=fno_skip,
+            domain_padding=boundary_domain_padding,
+            fno_block_precision=fno_block_precision,
+            stabilizer=stabilizer,
+            max_n_modes=max_boundary_n_modes,
+            factorization=factorization,
+            rank=rank,
+            fixed_rank_modes=fixed_rank_modes,
+            implementation=implementation,
+            decomposition_kwargs=decomposition_kwargs,
+            separable=separable,
+            preactivation=preactivation,
+            conv_module=conv_module,
+            enforce_hermitian_symmetry=enforce_hermitian_symmetry,
+        )
+        self.f_boundary_encoder = FNOEncoder(
+            n_modes=self._boundary_n_modes,
+            in_channels=self.f_boundary_channels,
+            **encoder_kwargs,
+        )
+        self.n_boundary_encoder = FNOEncoder(
+            n_modes=self._boundary_n_modes,
+            in_channels=self.n_boundary_channels,
+            **encoder_kwargs,
+        )
+
+        pair_mixer_channels = int(projection_channel_ratio * hidden_channels)
+        self.context_pair_mixer = ChannelMLP(
+            in_channels=2 * hidden_channels,
+            out_channels=hidden_channels,
+            hidden_channels=pair_mixer_channels,
+            n_layers=2,
+            n_dim=1,
+            non_linearity=non_linearity,
+        )
+        self.coefficient_grid_embedding = GridEmbeddingND(
+            in_channels=hidden_channels,
+            dim=2,
+            grid_boundaries=[[0.0, 1.0], [0.0, 1.0]],
+        )
+
+        self.decoder = FNODecoder(
+            n_modes=self._coefficient_n_modes,
+            hidden_channels=hidden_channels,
+            out_channels=self.coefficient_channels,
+            in_channels=hidden_channels + 2,
+            n_layers=decoder_layers,
+            projection_channel_ratio=projection_channel_ratio,
+            non_linearity=non_linearity,
+            norm=norm,
+            norm_groups=norm_groups,
+            use_channel_mlp=use_channel_mlp,
+            channel_mlp_dropout=channel_mlp_dropout,
+            channel_mlp_expansion=channel_mlp_expansion,
+            channel_mlp_skip=channel_mlp_skip,
+            fno_skip=fno_skip,
+            domain_padding=coefficient_domain_padding,
+            fno_block_precision=fno_block_precision,
+            stabilizer=stabilizer,
+            max_n_modes=max_coefficient_n_modes,
+            factorization=factorization,
+            rank=rank,
+            fixed_rank_modes=fixed_rank_modes,
+            implementation=implementation,
+            decomposition_kwargs=decomposition_kwargs,
+            separable=separable,
+            preactivation=preactivation,
+            conv_module=conv_module,
+            enforce_hermitian_symmetry=enforce_hermitian_symmetry,
+        )
+
+    def forward(
+        self,
+        f_boundary_context,
+        n_boundary_context,
+        y=None,
+        output_shape=None,
+        **kwargs,
+    ):
+        """Predict a 2D coefficient field from paired boundary contexts.
+
+        Parameters
+        ----------
+        f_boundary_context : torch.Tensor
+            Shape ``(batch, n_context, channels, n_boundary_points)``.
+        n_boundary_context : torch.Tensor
+            Paired Neumann traces with the same batch, context, and point axes.
+        y : torch.Tensor, optional
+            Coefficient target. Its spatial shape is used when neither the
+            forward call nor constructor specifies ``output_shape``; values are
+            only used for shape validation, never to form the prediction.
+        output_shape : tuple, optional
+            Requested coefficient-grid shape, as ``(height, width)``. Defaults
+            to the constructor's ``output_shape`` and then to ``y``'s shape.
+        """
+
+        if kwargs:
+            warnings.warn(
+                "FNOSetsCalderon.forward() received unexpected keyword "
+                f"arguments: {list(kwargs.keys())}. These arguments will be ignored.",
+                UserWarning,
+                stacklevel=2,
+            )
+        if f_boundary_context.ndim != 4 or n_boundary_context.ndim != 4:
+            raise ValueError(
+                "Expected boundary contexts to have shape "
+                "(batch, n_context, channels, n_boundary_points); got "
+                f"{tuple(f_boundary_context.shape)} and "
+                f"{tuple(n_boundary_context.shape)}."
+            )
+        if any(size < 1 for size in f_boundary_context.shape):
+            raise ValueError("Boundary contexts must not contain empty dimensions.")
+        if (
+            f_boundary_context.shape[:2] != n_boundary_context.shape[:2]
+            or f_boundary_context.shape[-1] != n_boundary_context.shape[-1]
+        ):
+            raise ValueError(
+                "Dirichlet and Neumann contexts must agree on batch size, "
+                "context count, and boundary-point count."
+            )
+        if f_boundary_context.shape[2] != self.f_boundary_channels:
+            raise ValueError(
+                f"Expected {self.f_boundary_channels} Dirichlet channels, got "
+                f"{f_boundary_context.shape[2]}."
+            )
+        if n_boundary_context.shape[2] != self.n_boundary_channels:
+            raise ValueError(
+                f"Expected {self.n_boundary_channels} Neumann channels, got "
+                f"{n_boundary_context.shape[2]}."
+            )
+
+        if output_shape is None:
+            output_shape = self.output_shape
+        if output_shape is None and y is not None:
+            output_shape = tuple(y.shape[-2:])
+        if output_shape is None:
+            raise ValueError(
+                "Specify output_shape in the constructor or forward call when "
+                "predicting without a coefficient target."
+            )
+        output_shape = tuple(int(size) for size in output_shape)
+        if len(output_shape) != 2 or any(size < 1 for size in output_shape):
+            raise ValueError(
+                f"output_shape must contain two positive sizes, got {output_shape}."
+            )
+
+        batch_size, n_context = f_boundary_context.shape[:2]
+        f_shape = f_boundary_context.shape[2:]
+        n_shape = n_boundary_context.shape[2:]
+        f_flat = f_boundary_context.reshape(batch_size * n_context, *f_shape)
+        n_flat = n_boundary_context.reshape(batch_size * n_context, *n_shape)
+        h_f = self.f_boundary_encoder(f_flat)
+        h_n = self.n_boundary_encoder(n_flat)
+        pair_features = self.context_pair_mixer(torch.cat([h_f, h_n], dim=1))
+        pair_features = pair_features.reshape(
+            batch_size,
+            n_context,
+            self.hidden_channels,
+            pair_features.shape[-1],
+        )
+        operator_features = pair_features.mean(dim=-1).mean(dim=1)
+        coefficient_latent = operator_features[:, :, None, None].expand(
+            -1, -1, output_shape[0], output_shape[1]
+        )
+        decoder_input = self.coefficient_grid_embedding(coefficient_latent)
+        output = self.decoder(decoder_input)
+
+        if y is not None and output.shape != y.shape:
+            raise ValueError(
+                "FNOSetsCalderon output and target shapes must match; got "
+                f"output={tuple(output.shape)} and target={tuple(y.shape)}."
+            )
+        return output
+
+    @property
+    def boundary_n_modes(self):
+        return self._boundary_n_modes
+
+    @boundary_n_modes.setter
+    def boundary_n_modes(self, modes):
+        if isinstance(modes, int):
+            modes = (modes,)
+        if len(modes) != 1:
+            raise ValueError("boundary_n_modes must contain exactly one value.")
+        self.f_boundary_encoder.n_modes = modes
+        self.n_boundary_encoder.n_modes = modes
+        self._boundary_n_modes = tuple(modes)
+
+    @property
+    def coefficient_n_modes(self):
+        return self._coefficient_n_modes
+
+    @coefficient_n_modes.setter
+    def coefficient_n_modes(self, modes):
+        if isinstance(modes, int):
+            modes = (modes, modes)
+        if len(modes) != 2:
+            raise ValueError("coefficient_n_modes must contain exactly two values.")
+        self.decoder.n_modes = modes
+        self._coefficient_n_modes = tuple(modes)

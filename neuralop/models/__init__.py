@@ -1,5 +1,5 @@
 from .fno import TFNO, FNO
-from .fnosets import FNOSets, FNOSetsInverse
+from .fnosets import FNOSets, FNOSetsCalderon, FNOSetsInverse
 
 # only import SFNO if torch_harmonics is built locally
 try:

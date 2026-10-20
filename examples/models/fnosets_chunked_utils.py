@@ -1,6 +1,6 @@
 """Shared training, evaluation, and plotting helpers for chunked FNOSets examples.
 
-The runnable examples live beside this module. Each example supplies its
+The runnable examples live inside this module. Each example supplies its
 chunk/checkpoint paths and model settings, while these helpers keep the
 forward and inverse workflows consistent.
 """
